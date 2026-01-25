@@ -2,3 +2,4 @@
 images/processed/*
 obj/*
 sobelf
+.cache
