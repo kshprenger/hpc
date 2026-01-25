@@ -1,0 +1,16 @@
+[
+  {
+    "file": "src/gif_font.c",
+    "arguments": [
+      "gcc",
+      "-O3",
+      "-Iinclude",
+      "-c",
+      "-o",
+      "obj/gif_font.o",
+      "src/gif_font.c"
+    ],
+    "directory": "/Users/kshprenger/dev/hpc",
+    "output": "obj/gif_font.o"
+  }
+]
