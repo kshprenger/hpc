@@ -1,5 +1,7 @@
 .DS_Store
 images/processed/*
 obj/*
+obj_parallel/*
 sobelf
+parallel_sobelf
 .cache
