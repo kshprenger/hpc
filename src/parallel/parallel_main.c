@@ -40,7 +40,6 @@ int main(int argc, char **argv) {
     /* IMPORT Timer start */
     gettimeofday(&t1, NULL);
 
-    /* Load file and store the pixels in array */
     image = load_pixels(input_filename);
     if (image == NULL) {
       MPI_Finalize();
@@ -56,13 +55,10 @@ int main(int argc, char **argv) {
     /* FILTER Timer start */
     gettimeofday(&t1, NULL);
 
-    /* Convert the pixels into grayscale */
     apply_gray_filter(image);
 
-    /* Apply blur filter with convergence value */
     apply_blur_filter(image, 5, 20);
 
-    /* Apply sobel filter on pixels */
     apply_sobel_filter(image);
 
     /* FILTER Timer stop */
@@ -73,7 +69,6 @@ int main(int argc, char **argv) {
     /* EXPORT Timer start */
     gettimeofday(&t1, NULL);
 
-    /* Store file from array of pixels to GIF file */
     if (!store_pixels(output_filename, image)) {
       MPI_Finalize();
       return 1;
@@ -88,14 +83,11 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  /* Multi-node MPI execution starts here */
-
   /* IMPORT Timer start */
   if (rank == 0) {
     gettimeofday(&t1, NULL);
   }
 
-  /* Load file on rank 0 */
   if (rank == 0) {
     image = load_pixels(input_filename);
     if (image == NULL) {
@@ -133,7 +125,6 @@ int main(int argc, char **argv) {
     printf("Distributing %d frames across %d MPI ranks\n", total_images, size);
   }
 
-  /* Allocate local image structure */
   local_image = (animated_gif *)malloc(sizeof(animated_gif));
   local_image->n_images = local_n_images;
   local_image->width = (int *)malloc(local_n_images * sizeof(int));
@@ -233,7 +224,6 @@ int main(int argc, char **argv) {
   /* FILTER Timer start */
   gettimeofday(&t1, NULL);
 
-  /* Apply filters on local images */
   if (local_n_images > 0) {
     apply_gray_filter(local_image);
     apply_blur_filter(local_image, 5, 20);
@@ -311,7 +301,6 @@ int main(int argc, char **argv) {
     printf("Export done in %lf s in file %s\n", duration, output_filename);
   }
 
-  /* Cleanup */
   if (local_image) {
     for (int i = 0; i < local_n_images; i++) {
       free(local_image->p[i]);

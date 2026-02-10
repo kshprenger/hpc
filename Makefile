@@ -78,3 +78,4 @@ parallel_sobelf: $(OBJ_PARALLEL)
 clean:
 	rm -f sobelf parallel_sobelf
 	rm -rf $(OBJ_DIR) $(OBJ_DIR_PARALLEL)
+	./clean_test.sh
