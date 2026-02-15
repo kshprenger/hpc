@@ -1,5 +1,5 @@
-#ifndef TASK_H
-#define TASK_H
+#ifndef SPLIT_H
+#define SPLIT_H
 #include "gif_model.h"
 #include <assert.h>
 #include <stdbool.h>
