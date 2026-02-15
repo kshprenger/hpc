@@ -9,7 +9,8 @@
 // Represents smallest task which distributes over MPI and is being feeded to
 // openmp runtime: either whole image or part of splitting.
 typedef struct Region {
-  int region_id; // For distinguishing from regions of other images
+  int image_id;  // For distinguishing from regions of other images
+  int region_id; // For sorting inside one image
   int width;
   int height;
   pixel *p;
@@ -64,7 +65,8 @@ Region *Split(pixel *p, int image_id, int width, int height, int k) {
       regions[region_idx].width = bordered_width;
       regions[region_idx].height = bordered_height;
       regions[region_idx].whole = (k == 1);
-      regions[region_idx].region_id = image_id;
+      regions[region_idx].region_id = region_idx;
+      regions[region_idx].image_id = image_id;
 
       regions[region_idx].p =
           (pixel *)malloc(bordered_width * bordered_height * sizeof(pixel));
@@ -106,31 +108,34 @@ pixel *Combine(Region *regions, int width, int height, int k) {
 
   // Copy processed data back from regions (excluding extra borders from sobel
   // filter)
-  for (int row = 0; row < k; row++) {
-    for (int col = 0; col < k; col++) {
-      size_t region_idx = row * k + col;
-      Region *region = &regions[region_idx];
+  // Copy processed data back from regions (excluding borders)
+  for (int i = 0; i < k * k; i++) {
+    Region *region = &regions[i];
+    int region_id = region->region_id;
 
-      // Calculate original region boundaries
-      int start_x = col * region_width;
-      int start_y = row * region_height;
-      int end_x = (col == k - 1) ? width : start_x + region_width;
-      int end_y = (row == k - 1) ? height : start_y + region_height;
+    // Calculate row and col from region_id
+    int row = region_id / k;
+    int col = region_id % k;
 
-      // Calculate border offset (how much border was added)
-      int border_offset_x = (start_x > 0) ? 1 : 0;
-      int border_offset_y = (start_y > 0) ? 1 : 0;
+    // Calculate original region boundaries
+    int start_x = col * region_width;
+    int start_y = row * region_height;
+    int end_x = (col == k - 1) ? width : start_x + region_width;
+    int end_y = (row == k - 1) ? height : start_y + region_height;
 
-      // Copy pixel data back (excluding borders)
-      for (int y = start_y; y < end_y; y++) {
-        for (int x = start_x; x < end_x; x++) {
-          int src_x = x - start_x + border_offset_x;
-          int src_y = y - start_y + border_offset_y;
-          int src_idx = src_y * region->width + src_x;
-          int dst_idx = y * width + x;
+    // Calculate border offset (how much border was added)
+    int border_offset_x = (start_x > 0) ? 1 : 0;
+    int border_offset_y = (start_y > 0) ? 1 : 0;
 
-          result[dst_idx] = region->p[src_idx];
-        }
+    // Copy pixel data back (excluding borders)
+    for (int y = start_y; y < end_y; y++) {
+      for (int x = start_x; x < end_x; x++) {
+        int src_x = x - start_x + border_offset_x;
+        int src_y = y - start_y + border_offset_y;
+        int src_idx = src_y * region->width + src_x;
+        int dst_idx = y * width + x;
+
+        result[dst_idx] = region->p[src_idx];
       }
     }
   }
