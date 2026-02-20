@@ -7,8 +7,8 @@ OBJ_DIR_PARALLEL=obj_parallel
 CC=gcc
 MPICC=mpicc
 CFLAGS=-O3 -I$(HEADER_DIR)
-CFLAGS_PARALLEL=-O3 -I$(HEADER_DIR)
-LDFLAGS=-lm
+CFLAGS_PARALLEL=-O3 -I$(HEADER_DIR) -fopenmp
+LDFLAGS=-lm -fopenmp
 LDFLAGS_PARALLEL=-lm
 
 # Common source files (GIF library)
