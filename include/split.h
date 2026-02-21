@@ -18,8 +18,8 @@ typedef struct Region {
   pixel *p;
 } Region;
 
-Region *Split(pixel *p, int image_id, int image_width, int image_height,
-              int k_regions) {
+static inline Region *Split(pixel *p, int image_id, int image_width,
+                            int image_height, int k_regions) {
   if (!p || k_regions == 0) {
     abort();
   }
@@ -75,8 +75,8 @@ Region *Split(pixel *p, int image_id, int image_width, int image_height,
 }
 
 // Combines k Regions back into a single image
-pixel *Combine(Region *regions, int image_width, int image_height,
-               int k_regions) {
+static inline pixel *Combine(Region *regions, int image_width, int image_height,
+                             int k_regions) {
   if (!regions || k_regions == 0) {
     abort();
   }

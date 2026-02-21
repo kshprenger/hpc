@@ -40,6 +40,8 @@ OBJ_PARALLEL= $(OBJ_DIR_PARALLEL)/dgif_lib.o \
 	$(OBJ_DIR_PARALLEL)/gif_hash.o \
 	$(OBJ_DIR_PARALLEL)/gifalloc.o \
 	$(OBJ_DIR_PARALLEL)/parallel_main.o \
+	$(OBJ_DIR_PARALLEL)/mpi_master.o \
+	$(OBJ_DIR_PARALLEL)/mpi_slave.o \
 	$(OBJ_DIR_PARALLEL)/blur_filter.o \
 	$(OBJ_DIR_PARALLEL)/grey_filter.o \
 	$(OBJ_DIR_PARALLEL)/image_load.o \
