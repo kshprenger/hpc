@@ -6,7 +6,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Calculate total buffer size needed for a batch of regions
+#define TAG_COMMAND 0
+#define TAG_REGION_COUNT 1
+#define TAG_BUFFER_SIZE 2
+#define TAG_BUFFER_DATA 3
+#define TAG_RESULT_SIZE 4
+#define TAG_RESULT_DATA 5
+
+#define CMD_PROCESS_SPLIT_IMAGE 1
+#define CMD_PROCESS_BATCH 2
+#define CMD_TERMINATE 3
+
 static int calculate_batch_buffer_size(Region *regions, int count) {
   int total_size = 0;
   for (int i = 0; i < count; i++) {
@@ -17,7 +27,6 @@ static int calculate_batch_buffer_size(Region *regions, int count) {
   return total_size;
 }
 
-// Pack a batch of regions into a single buffer
 static void pack_regions(Region *regions, int count, char *buffer,
                          int buffer_size, MPI_Comm comm) {
   int position = 0;
@@ -33,7 +42,6 @@ static void pack_regions(Region *regions, int count, char *buffer,
   }
 }
 
-// Unpack a batch of regions from a single buffer
 static void unpack_regions(Region *regions, int count, char *buffer,
                            int buffer_size, MPI_Comm comm) {
   int position = 0;
@@ -55,76 +63,104 @@ static void unpack_regions(Region *regions, int count, char *buffer,
   }
 }
 
-// Slave routine: receives batch of regions from master, processes them, sends
-// back
-void Slave(void) {
-  int rank;
-  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+// Handle processing of a split image (with ghost cell synchronization)
+static void handle_split_image(int rank) {
+  int buffer_size;
+  MPI_Recv(&buffer_size, 1, MPI_INT, 0, TAG_BUFFER_SIZE, MPI_COMM_WORLD,
+           MPI_STATUS_IGNORE);
 
-  // Receive count of regions to process
+  char *recv_buffer = (char *)malloc(buffer_size);
+  MPI_Recv(recv_buffer, buffer_size, MPI_PACKED, 0, TAG_BUFFER_DATA,
+           MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+  Region region;
+  unpack_regions(&region, 1, recv_buffer, buffer_size, MPI_COMM_WORLD);
+  free(recv_buffer);
+
+  apply_all_filters_to_region_mpi(&region, 5, 20, MPI_COMM_WORLD);
+
+  int send_buffer_size = calculate_batch_buffer_size(&region, 1);
+  char *send_buffer = (char *)malloc(send_buffer_size);
+  pack_regions(&region, 1, send_buffer, send_buffer_size, MPI_COMM_WORLD);
+
+  MPI_Send(&send_buffer_size, 1, MPI_INT, 0, TAG_RESULT_SIZE, MPI_COMM_WORLD);
+  MPI_Send(send_buffer, send_buffer_size, MPI_PACKED, 0, TAG_RESULT_DATA,
+           MPI_COMM_WORLD);
+
+  free(send_buffer);
+  free(region.p);
+}
+
+static void handle_batch(int rank) {
   int region_count;
-  MPI_Recv(&region_count, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+  MPI_Recv(&region_count, 1, MPI_INT, 0, TAG_REGION_COUNT, MPI_COMM_WORLD,
+           MPI_STATUS_IGNORE);
 
   if (region_count <= 0) {
     return;
   }
 
-  Region *regions = (Region *)malloc(region_count * sizeof(Region));
-  if (!regions) {
-    fprintf(stderr, "Slave %d: Failed to allocate memory for regions\n", rank);
-    MPI_Abort(MPI_COMM_WORLD, 1);
-    return;
-  }
-
-  // Receive buffer size, then the packed buffer containing all regions
   int buffer_size;
-  MPI_Recv(&buffer_size, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-
-  char *recv_buffer = (char *)malloc(buffer_size);
-  if (!recv_buffer) {
-    fprintf(stderr, "Slave %d: Failed to allocate receive buffer\n", rank);
-    MPI_Abort(MPI_COMM_WORLD, 1);
-    return;
-  }
-
-  MPI_Recv(recv_buffer, buffer_size, MPI_PACKED, 0, 2, MPI_COMM_WORLD,
+  MPI_Recv(&buffer_size, 1, MPI_INT, 0, TAG_BUFFER_SIZE, MPI_COMM_WORLD,
            MPI_STATUS_IGNORE);
 
-  // Unpack all regions from the buffer
+  char *recv_buffer = (char *)malloc(buffer_size);
+  MPI_Recv(recv_buffer, buffer_size, MPI_PACKED, 0, TAG_BUFFER_DATA,
+           MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+  Region *regions = (Region *)malloc(region_count * sizeof(Region));
   unpack_regions(regions, region_count, recv_buffer, buffer_size,
                  MPI_COMM_WORLD);
-
   free(recv_buffer);
 
-  // Process each region: apply gray, blur, and sobel filters
   for (int r = 0; r < region_count; r++) {
     apply_all_filters_to_region(&regions[r], 5, 20);
   }
 
-  // Calculate buffer size for sending processed regions back
   int send_buffer_size = calculate_batch_buffer_size(regions, region_count);
   char *send_buffer = (char *)malloc(send_buffer_size);
-  if (!send_buffer) {
-    fprintf(stderr, "Slave %d: Failed to allocate send buffer\n", rank);
-    MPI_Abort(MPI_COMM_WORLD, 1);
-    return;
-  }
-
-  // Pack all processed regions into single buffer
   pack_regions(regions, region_count, send_buffer, send_buffer_size,
                MPI_COMM_WORLD);
 
-  // Send buffer size, then the packed buffer back to master
-  MPI_Send(&send_buffer_size, 1, MPI_INT, 0, 3, MPI_COMM_WORLD);
-  MPI_Send(send_buffer, send_buffer_size, MPI_PACKED, 0, 4, MPI_COMM_WORLD);
+  MPI_Send(&send_buffer_size, 1, MPI_INT, 0, TAG_RESULT_SIZE, MPI_COMM_WORLD);
+  MPI_Send(send_buffer, send_buffer_size, MPI_PACKED, 0, TAG_RESULT_DATA,
+           MPI_COMM_WORLD);
 
   free(send_buffer);
 
-  // Free allocated memory for regions
   for (int r = 0; r < region_count; r++) {
     if (regions[r].p) {
       free(regions[r].p);
     }
   }
   free(regions);
+}
+
+void Slave(void) {
+  int rank;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+  while (1) {
+    int cmd;
+    MPI_Recv(&cmd, 1, MPI_INT, 0, TAG_COMMAND, MPI_COMM_WORLD,
+             MPI_STATUS_IGNORE);
+
+    switch (cmd) {
+    case CMD_PROCESS_SPLIT_IMAGE:
+      handle_split_image(rank);
+      break;
+
+    case CMD_PROCESS_BATCH:
+      handle_batch(rank);
+      break;
+
+    case CMD_TERMINATE:
+      return;
+
+    default:
+      fprintf(stderr, "Slave %d: Unknown command %d\n", rank, cmd);
+      MPI_Abort(MPI_COMM_WORLD, 1);
+      return;
+    }
+  }
 }

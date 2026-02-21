@@ -8,9 +8,18 @@
 #include <string.h>
 #include <sys/time.h>
 
-extern void Slave(void);
+#define TAG_COMMAND 0
+#define TAG_REGION_COUNT 1
+#define TAG_BUFFER_SIZE 2
+#define TAG_BUFFER_DATA 3
+#define TAG_RESULT_SIZE 4
+#define TAG_RESULT_DATA 5
 
-// Helper function to compare regions for sorting by image_id then region_id
+// Master -> Workers
+#define CMD_PROCESS_SPLIT_IMAGE 1
+#define CMD_PROCESS_BATCH 2
+#define CMD_TERMINATE 3
+
 static int compare_regions(const void *a, const void *b) {
   const Region *ra = (const Region *)a;
   const Region *rb = (const Region *)b;
@@ -20,9 +29,7 @@ static int compare_regions(const void *a, const void *b) {
   return ra->region_id - rb->region_id;
 }
 
-// Calculate total buffer size needed for a batch of regions
 static int calculate_batch_buffer_size(Region *regions, int count) {
-  // For each region: 5 ints (metadata) + pixel data
   int total_size = 0;
   for (int i = 0; i < count; i++) {
     total_size += 5 * sizeof(int); // metadata
@@ -70,6 +77,147 @@ static void unpack_regions(Region *regions, int count, char *buffer,
   }
 }
 
+static void process_split_image(animated_gif *image, int image_idx,
+                                int world_size, Region **result_regions) {
+  Region *regions =
+      Split(image->p[image_idx], image_idx, image->width[image_idx],
+            image->height[image_idx], world_size);
+
+  int cmd = CMD_PROCESS_SPLIT_IMAGE;
+  for (int w = 1; w < world_size; w++) {
+    MPI_Send(&cmd, 1, MPI_INT, w, TAG_COMMAND, MPI_COMM_WORLD);
+  }
+
+  for (int w = 1; w < world_size; w++) {
+    int buffer_size = calculate_batch_buffer_size(&regions[w], 1);
+    char *buffer = (char *)malloc(buffer_size);
+    pack_regions(&regions[w], 1, buffer, buffer_size, MPI_COMM_WORLD);
+
+    MPI_Send(&buffer_size, 1, MPI_INT, w, TAG_BUFFER_SIZE, MPI_COMM_WORLD);
+    MPI_Send(buffer, buffer_size, MPI_PACKED, w, TAG_BUFFER_DATA,
+             MPI_COMM_WORLD);
+
+    free(buffer);
+    free(regions[w].p);
+  }
+
+  Region *master_region = &regions[0];
+
+  apply_all_filters_to_region_mpi(master_region, 5, 20, MPI_COMM_WORLD);
+
+  *result_regions = (Region *)malloc(world_size * sizeof(Region));
+  (*result_regions)[0] = *master_region;
+
+  for (int w = 1; w < world_size; w++) {
+    int buffer_size;
+    MPI_Recv(&buffer_size, 1, MPI_INT, w, TAG_RESULT_SIZE, MPI_COMM_WORLD,
+             MPI_STATUS_IGNORE);
+
+    char *buffer = (char *)malloc(buffer_size);
+    MPI_Recv(buffer, buffer_size, MPI_PACKED, w, TAG_RESULT_DATA,
+             MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+    unpack_regions(&(*result_regions)[w], 1, buffer, buffer_size,
+                   MPI_COMM_WORLD);
+    free(buffer);
+  }
+
+  free(regions);
+}
+
+static void process_nonsplit_images_batch(animated_gif *image,
+                                          int *image_indices, int num_images,
+                                          int world_size,
+                                          Region **result_regions,
+                                          int *result_count) {
+  Region *all_regions = (Region *)malloc(num_images * sizeof(Region));
+  for (int i = 0; i < num_images; i++) {
+    int idx = image_indices[i];
+    Region *r =
+        Split(image->p[idx], idx, image->width[idx], image->height[idx], 1);
+    all_regions[i] = r[0];
+    free(r);
+  }
+
+  Region **worker_regions = (Region **)malloc(world_size * sizeof(Region *));
+  int *worker_counts = (int *)calloc(world_size, sizeof(int));
+
+  for (int w = 0; w < world_size; w++) {
+    worker_regions[w] = (Region *)malloc(num_images * sizeof(Region));
+  }
+
+  for (int i = 0; i < num_images; i++) {
+    int worker_id = i % world_size;
+    worker_regions[worker_id][worker_counts[worker_id]++] = all_regions[i];
+  }
+
+  free(all_regions);
+
+  int cmd = CMD_PROCESS_BATCH;
+  for (int w = 1; w < world_size; w++) {
+    MPI_Send(&cmd, 1, MPI_INT, w, TAG_COMMAND, MPI_COMM_WORLD);
+  }
+
+  for (int w = 1; w < world_size; w++) {
+    int count = worker_counts[w];
+    MPI_Send(&count, 1, MPI_INT, w, TAG_REGION_COUNT, MPI_COMM_WORLD);
+
+    if (count > 0) {
+      int buffer_size = calculate_batch_buffer_size(worker_regions[w], count);
+      char *buffer = (char *)malloc(buffer_size);
+      pack_regions(worker_regions[w], count, buffer, buffer_size,
+                   MPI_COMM_WORLD);
+
+      MPI_Send(&buffer_size, 1, MPI_INT, w, TAG_BUFFER_SIZE, MPI_COMM_WORLD);
+      MPI_Send(buffer, buffer_size, MPI_PACKED, w, TAG_BUFFER_DATA,
+               MPI_COMM_WORLD);
+
+      free(buffer);
+
+      for (int r = 0; r < count; r++) {
+        free(worker_regions[w][r].p);
+      }
+    }
+  }
+
+  int master_count = worker_counts[0];
+  for (int r = 0; r < master_count; r++) {
+    apply_all_filters_to_region(&worker_regions[0][r], 5, 20);
+  }
+
+  *result_count = num_images;
+  *result_regions = (Region *)malloc(num_images * sizeof(Region));
+  int result_idx = 0;
+
+  for (int r = 0; r < master_count; r++) {
+    (*result_regions)[result_idx++] = worker_regions[0][r];
+  }
+
+  for (int w = 1; w < world_size; w++) {
+    int count = worker_counts[w];
+    if (count > 0) {
+      int buffer_size;
+      MPI_Recv(&buffer_size, 1, MPI_INT, w, TAG_RESULT_SIZE, MPI_COMM_WORLD,
+               MPI_STATUS_IGNORE);
+
+      char *buffer = (char *)malloc(buffer_size);
+      MPI_Recv(buffer, buffer_size, MPI_PACKED, w, TAG_RESULT_DATA,
+               MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+      unpack_regions(&(*result_regions)[result_idx], count, buffer, buffer_size,
+                     MPI_COMM_WORLD);
+      free(buffer);
+      result_idx += count;
+    }
+  }
+
+  for (int w = 0; w < world_size; w++) {
+    free(worker_regions[w]);
+  }
+  free(worker_regions);
+  free(worker_counts);
+}
+
 void Master(char *input_file, char *output_file) {
   int rank, world_size;
   animated_gif *image = NULL;
@@ -95,20 +243,19 @@ void Master(char *input_file, char *output_file) {
 
   int n_images = image->n_images;
 
-  // Special case: Single rank
+  // Special case: Single rank - no MPI communication
   if (world_size == 1) {
     gettimeofday(&t1, NULL);
 
-    // Process all images locally without any MPI communication
     for (int i = 0; i < n_images; i++) {
-      // Create a single region for the entire image (k_regions = 1)
       Region *regions =
           Split(image->p[i], i, image->width[i], image->height[i], 1);
-
       apply_all_filters_to_region(&regions[0], 5, 20);
-
       pixel *combined = Combine(regions, image->width[i], image->height[i], 1);
+      free(image->p[i]);
       image->p[i] = combined;
+      free(regions[0].p);
+      free(regions);
     }
 
     gettimeofday(&t2, NULL);
@@ -122,154 +269,63 @@ void Master(char *input_file, char *output_file) {
       return;
     }
 
-    gettimeofday(&t2, NULL);
-    duration = (t2.tv_sec - t1.tv_sec) + ((t2.tv_usec - t1.tv_usec) / 1e6);
-    printf("Export done in %lf s in file %s\n", duration, output_file);
-
     return;
   }
 
-  // Multi-rank execution of master
-
+  // Multi-rank processing
   gettimeofday(&t1, NULL);
 
-  Region **worker_regions = (Region **)malloc(world_size * sizeof(Region *));
-  int *worker_region_count = (int *)calloc(world_size, sizeof(int));
-  int *worker_region_capacity = (int *)malloc(world_size * sizeof(int));
+  int *split_images = (int *)malloc(n_images * sizeof(int));
+  int *nonsplit_images = (int *)malloc(n_images * sizeof(int));
+  int num_split = 0;
+  int num_nonsplit = 0;
 
-  for (int w = 0; w < world_size; w++) {
-    worker_region_capacity[w] = 16;
-    worker_regions[w] =
-        (Region *)malloc(worker_region_capacity[w] * sizeof(Region));
-  }
-
-  // Track total regions created for later receiving
-  int total_regions = 0;
-
-  // Round-robin counter for images that aren't split
-  int rr_counter = 0;
-
-  for (int i = 0; i < n_images; i++) {
-    Region *regions;
-    int k_regions;
-
-    if (n_images < world_size) {
-      // If images count < ranks, split each image by rank count
-      k_regions = world_size;
-      regions =
-          Split(image->p[i], i, image->width[i], image->height[i], k_regions);
-    } else {
-      // If images >= ranks, only split remainder images
-      int remainder = n_images % world_size;
-      if (i < remainder) {
-        k_regions = world_size;
-        regions =
-            Split(image->p[i], i, image->width[i], image->height[i], k_regions);
-      } else {
-        // Entire goes to single rank without actual splitting
-        regions = Split(image->p[i], i, image->width[i], image->height[i], 1);
-      }
+  if (n_images < world_size) {
+    for (int i = 0; i < n_images; i++) {
+      split_images[num_split++] = i;
     }
-
-    total_regions += k_regions;
-
-    // Assign regions to workers
-    if (k_regions == world_size) {
-      for (int r = 0; r < k_regions; r++) {
-        int worker_id = r;
-
-        if (worker_region_count[worker_id] >=
-            worker_region_capacity[worker_id]) {
-          worker_region_capacity[worker_id] *= 2;
-          worker_regions[worker_id] = (Region *)realloc(
-              worker_regions[worker_id],
-              worker_region_capacity[worker_id] * sizeof(Region));
-        }
-
-        worker_regions[worker_id][worker_region_count[worker_id]] = regions[r];
-        worker_region_count[worker_id]++;
-      }
-    } else {
-      // k_regions == 1, assign whole image to a single worker
-      // in round-robin manner
-      int worker_id = rr_counter % world_size;
-      rr_counter++;
-
-      if (worker_region_count[worker_id] >= worker_region_capacity[worker_id]) {
-        worker_region_capacity[worker_id] *= 2;
-        worker_regions[worker_id] = (Region *)realloc(
-            worker_regions[worker_id],
-            worker_region_capacity[worker_id] * sizeof(Region));
-      }
-
-      worker_regions[worker_id][worker_region_count[worker_id]] = regions[0];
-      worker_region_count[worker_id]++;
+  } else {
+    int remainder = n_images % world_size;
+    for (int i = 0; i < remainder; i++) {
+      split_images[num_split++] = i;
+    }
+    for (int i = remainder; i < n_images; i++) {
+      nonsplit_images[num_nonsplit++] = i;
     }
   }
 
-  // Transmit region batches
-  for (int w = 1; w < world_size; w++) { // world_size >= 2
-    int count = worker_region_count[w];
+  Region *all_results =
+      (Region *)malloc((n_images * world_size) * sizeof(Region));
+  int total_results = 0;
 
-    // Send regions count
-    MPI_Send(&count, 1, MPI_INT, w, 0, MPI_COMM_WORLD);
+  // Process spliTted images one at a time (requires ghost cell sync)
+  // Parallelize???
+  for (int i = 0; i < num_split; i++) {
+    Region *split_results;
+    process_split_image(image, split_images[i], world_size, &split_results);
 
-    if (count > 0) {
-      // Calculate buffer size and pack all regions into one buffer
-      // (optimization)
-      int buffer_size = calculate_batch_buffer_size(worker_regions[w], count);
-      char *send_buffer = (char *)malloc(buffer_size);
-
-      pack_regions(worker_regions[w], count, send_buffer, buffer_size,
-                   MPI_COMM_WORLD);
-
-      // Send buffer size, then packed buffer
-      MPI_Send(&buffer_size, 1, MPI_INT, w, 1, MPI_COMM_WORLD);
-      MPI_Send(send_buffer, buffer_size, MPI_PACKED, w, 2, MPI_COMM_WORLD);
-
-      for (int r = 0; r < count; r++) {
-        free(worker_regions[w][r].p);
-        worker_regions[w][r].p = NULL;
-      }
+    for (int r = 0; r < world_size; r++) {
+      all_results[total_results++] = split_results[r];
     }
+    free(split_results);
   }
 
-  // Master does not send regions to itself, it just process it locally
-  int master_count = worker_region_count[0];
-  Region *master_regions = worker_regions[0];
+  // Process non-splitted images as a batch (no ghost cell sync needed)
+  if (num_nonsplit > 0) {
+    Region *batch_results;
+    int batch_count;
+    process_nonsplit_images_batch(image, nonsplit_images, num_nonsplit,
+                                  world_size, &batch_results, &batch_count);
 
-  for (int r = 0; r < master_count; r++) {
-    apply_all_filters_to_region(&master_regions[r], 5, 20);
+    for (int r = 0; r < batch_count; r++) {
+      all_results[total_results++] = batch_results[r];
+    }
+    free(batch_results);
   }
 
-  // Gather work from other workers
-  Region *all_processed_regions =
-      (Region *)malloc(total_regions * sizeof(Region));
-  int processed_idx = 0;
-
-  for (int r = 0; r < master_count; r++) {
-    all_processed_regions[processed_idx++] = master_regions[r];
-  }
-
-  // Receive processed regions from each worker (single MPI call again)
+  int cmd = CMD_TERMINATE;
   for (int w = 1; w < world_size; w++) {
-    int count = worker_region_count[w];
-
-    if (count > 0) {
-      // Receive buffer size, then the packed buffer
-      int buffer_size;
-      MPI_Recv(&buffer_size, 1, MPI_INT, w, 3, MPI_COMM_WORLD,
-               MPI_STATUS_IGNORE);
-
-      char *recv_buffer = (char *)malloc(buffer_size);
-      MPI_Recv(recv_buffer, buffer_size, MPI_PACKED, w, 4, MPI_COMM_WORLD,
-               MPI_STATUS_IGNORE);
-
-      unpack_regions(&all_processed_regions[processed_idx], count, recv_buffer,
-                     buffer_size, MPI_COMM_WORLD);
-
-      processed_idx += count;
-    }
+    MPI_Send(&cmd, 1, MPI_INT, w, TAG_COMMAND, MPI_COMM_WORLD);
   }
 
   gettimeofday(&t2, NULL);
@@ -278,17 +334,16 @@ void Master(char *input_file, char *output_file) {
 
   gettimeofday(&t1, NULL);
 
-  // Sort all regions by image_id then by region_id
-  qsort(all_processed_regions, total_regions, sizeof(Region), compare_regions);
+  // Sort results by image_id then  by region_id
+  qsort(all_results, total_results, sizeof(Region), compare_regions);
 
-  // Combine!
   int region_idx = 0;
   for (int i = 0; i < n_images; i++) {
-    int image_region_count = 0;
     int start_idx = region_idx;
+    int image_region_count = 0;
 
-    while (region_idx < total_regions &&
-           all_processed_regions[region_idx].image_id == i) {
+    while (region_idx < total_results &&
+           all_results[region_idx].image_id == i) {
       image_region_count++;
       region_idx++;
     }
@@ -298,17 +353,17 @@ void Master(char *input_file, char *output_file) {
       continue;
     }
 
-    int k_regions = all_processed_regions[start_idx].k_regions;
-    pixel *combined = Combine(&all_processed_regions[start_idx],
-                              image->width[i], image->height[i], k_regions);
+    int k_regions = all_results[start_idx].k_regions;
+    pixel *combined = Combine(&all_results[start_idx], image->width[i],
+                              image->height[i], k_regions);
 
     free(image->p[i]);
     image->p[i] = combined;
 
     for (int r = start_idx; r < start_idx + image_region_count; r++) {
-      if (all_processed_regions[r].p) {
-        free(all_processed_regions[r].p);
-        all_processed_regions[r].p = NULL;
+      if (all_results[r].p) {
+        free(all_results[r].p);
+        all_results[r].p = NULL;
       }
     }
   }
@@ -317,8 +372,4 @@ void Master(char *input_file, char *output_file) {
     fprintf(stderr, "Master: Failed to store GIF to %s\n", output_file);
     MPI_Abort(MPI_COMM_WORLD, 1);
   }
-
-  gettimeofday(&t2, NULL);
-  duration = (t2.tv_sec - t1.tv_sec) + ((t2.tv_usec - t1.tv_usec) / 1e6);
-  printf("Export done in %lf s in file %s\n", duration, output_file);
 }

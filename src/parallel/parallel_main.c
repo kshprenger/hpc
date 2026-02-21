@@ -30,10 +30,8 @@ int main(int argc, char **argv) {
   output_filename = argv[2];
 
   if (rank == 0) {
-    /* Rank 0 is the master */
     Master(input_filename, output_filename);
   } else {
-    /* All other ranks are slaves */
     Slave();
   }
 
