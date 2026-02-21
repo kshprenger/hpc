@@ -1,6 +1,7 @@
 #ifndef SPLIT_H
 #define SPLIT_H
 #include "gif_model.h"
+#include <_abort.h>
 #include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -11,79 +12,61 @@
 typedef struct Region {
   int image_id;  // For distinguishing from regions of other images
   int region_id; // For sorting inside one image
-  int width;
-  int height;
+  int region_width;
+  int region_height;
+  int k_regions;
   pixel *p;
-  bool whole;
 } Region;
 
-// Splits image to k^2 Regions and adds extra borders for each region to sobel
-// filter. Each region will have overlapping 1-pixel borders from the original
-// image so Sobel filter can be applied independently to each region.
-// Other filter can just use inner part of region excluding borders.
-//
-// Why k^2 parts? k^2 part splitting always results into equal
-// parts. (event if width%k or height%k !=0, last region will be slightly
-// bigger by eating reminder from this division)
-//
-// For example if we want to process 5 images on 4 ranks - one image will be
-// splitted using k=2 to 4 pieces.
-Region *Split(pixel *p, int image_id, int width, int height, int k) {
-  if (!p || k == 0) {
-    assert(false);
+Region *Split(pixel *p, int image_id, int image_width, int image_height,
+              int k_regions) {
+  if (!p || k_regions == 0) {
+    abort();
   }
 
   // Calculate base dimensions for each region (without borders)
-  int region_width = width / k;
-  int region_height = height / k;
+  int region_width = image_width / k_regions;
+  assert(region_width > 0);
+  int region_height = image_height;
 
-  Region *regions = (Region *)malloc(k * k * sizeof(Region));
+  Region *regions = (Region *)malloc(k_regions * sizeof(Region));
   if (!regions) {
-    assert(false);
+    abort();
   }
 
-  for (size_t row = 0; row < k; row++) {
-    for (size_t col = 0; col < k; col++) {
-      size_t region_idx = row * k + col;
+  for (size_t region = 0; region < k_regions; region++) {
+    // Calculate region boundaries (x-axis, without borders)
+    int start_x = region * region_width;
+    int end_x =
+        (region == k_regions - 1) ? image_width : start_x + region_width;
 
-      // Calculate region boundaries (without borders)
-      int start_x = col * region_width;
-      int start_y = row * region_height;
-      int end_x = (col == k - 1) ? width : start_x + region_width;
-      int end_y = (row == k - 1) ? height : start_y + region_height;
+    // Add 5-pixel border for blur filter
+    int border_start_x = (start_x > 0) ? start_x - 5 : 0;
+    int border_end_x = (end_x < image_width) ? end_x + 5 : image_width;
 
-      // Add 1-pixel border for Sobel filter
-      int border_start_x = (start_x > 0) ? start_x - 1 : 0;
-      int border_start_y = (start_y > 0) ? start_y - 1 : 0;
-      int border_end_x = (end_x < width) ? end_x + 1 : width;
-      int border_end_y = (end_y < height) ? end_y + 1 : height;
+    int bordered_width = border_end_x - border_start_x;
 
-      // Calculate dimensions with borders
-      int bordered_width = border_end_x - border_start_x;
-      int bordered_height = border_end_y - border_start_y;
+    regions[region].region_id = region;
+    regions[region].image_id = image_id;
+    regions[region].region_width = bordered_width;
+    regions[region].region_height = image_height;
+    regions[region].k_regions = k_regions;
 
-      regions[region_idx].width = bordered_width;
-      regions[region_idx].height = bordered_height;
-      regions[region_idx].whole = (k == 1);
-      regions[region_idx].region_id = region_idx;
-      regions[region_idx].image_id = image_id;
+    regions[region].p =
+        (pixel *)malloc(bordered_width * image_height * sizeof(pixel));
+    if (!regions[region].p) {
+      abort();
+    }
 
-      regions[region_idx].p =
-          (pixel *)malloc(bordered_width * bordered_height * sizeof(pixel));
-      if (!regions[region_idx].p) {
-        assert(false);
-      }
+    // Copy pixel data with borders
+    for (int y = 0; y < image_height; y++) {
+      for (int x = 0; x < bordered_width; x++) {
+        int src_x = border_start_x + x;
+        int src_y = y;
+        int src_idx = src_y * image_width + src_x;
+        int dst_idx = y * bordered_width + x;
 
-      // Copy pixel data with borders
-      for (int y = 0; y < bordered_height; y++) {
-        for (int x = 0; x < bordered_width; x++) {
-          int src_x = border_start_x + x;
-          int src_y = border_start_y + y;
-          int src_idx = src_y * width + src_x;
-          int dst_idx = y * bordered_width + x;
-
-          regions[region_idx].p[dst_idx] = p[src_idx];
-        }
+        regions[region].p[dst_idx] = p[src_idx];
       }
     }
   }
@@ -91,49 +74,43 @@ Region *Split(pixel *p, int image_id, int width, int height, int k) {
   return regions;
 }
 
-// Combines k^2 Regions back into a single image
-pixel *Combine(Region *regions, int width, int height, int k) {
-  if (!regions || k == 0) {
-    assert(false);
+// Combines k Regions back into a single image
+pixel *Combine(Region *regions, int image_width, int image_height,
+               int k_regions) {
+  if (!regions || k_regions == 0) {
+    abort();
   }
 
-  pixel *result = (pixel *)malloc(width * height * sizeof(pixel));
+  pixel *result = (pixel *)malloc(image_width * image_height * sizeof(pixel));
   if (!result) {
-    assert(false);
+    abort();
   }
 
-  // Calculate base region dimensions
-  int region_width = width / k;
-  int region_height = height / k;
+  // Calculate base region width (without borders)
+  int base_region_width = image_width / k_regions;
 
-  // Copy processed data back from regions (excluding extra borders from sobel
-  // filter)
-  // Copy processed data back from regions (excluding borders)
-  for (int i = 0; i < k * k; i++) {
+  for (int i = 0; i < k_regions; i++) {
     Region *region = &regions[i];
     int region_id = region->region_id;
 
-    // Calculate row and col from region_id
-    int row = region_id / k;
-    int col = region_id % k;
+    // Calculate original region boundaries (without borders)
+    int start_x = region_id * base_region_width;
+    int end_x = (region_id == k_regions - 1) ? image_width
+                                             : start_x + base_region_width;
+    int start_y = 0;
+    int end_y = image_height;
 
-    // Calculate original region boundaries
-    int start_x = col * region_width;
-    int start_y = row * region_height;
-    int end_x = (col == k - 1) ? width : start_x + region_width;
-    int end_y = (row == k - 1) ? height : start_y + region_height;
-
-    // Calculate border offset (how much border was added)
-    int border_offset_x = (start_x > 0) ? 1 : 0;
-    int border_offset_y = (start_y > 0) ? 1 : 0;
+    // Calculate border offset (5 pixels were added in Split)
+    int border_offset_x = (start_x > 0) ? 5 : 0;
+    int border_offset_y = 0; // No vertical borders for column splitting
 
     // Copy pixel data back (excluding borders)
     for (int y = start_y; y < end_y; y++) {
       for (int x = start_x; x < end_x; x++) {
         int src_x = x - start_x + border_offset_x;
         int src_y = y - start_y + border_offset_y;
-        int src_idx = src_y * region->width + src_x;
-        int dst_idx = y * width + x;
+        int src_idx = src_y * region->region_width + src_x;
+        int dst_idx = y * image_width + x;
 
         result[dst_idx] = region->p[src_idx];
       }
@@ -141,19 +118,6 @@ pixel *Combine(Region *regions, int width, int height, int k) {
   }
 
   return result;
-}
-
-void FreeRegions(Region *regions, size_t k) {
-  if (!regions) {
-    assert(false);
-  }
-
-  for (size_t i = 0; i < k * k; i++) {
-    if (regions[i].p) {
-      free(regions[i].p);
-    }
-  }
-  free(regions);
 }
 
 #endif
