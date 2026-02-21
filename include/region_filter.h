@@ -49,7 +49,6 @@ static inline void apply_blur_filter_to_region(Region *region, int size,
     end = 1;
     n_iter++;
 
-    // Initialize new pixels with original values
     for (int j = 0; j < height - 1; j++) {
       for (int k = 0; k < width - 1; k++) {
         new_pixels[CONV(j, k, width)].r = p[CONV(j, k, width)].r;
@@ -58,7 +57,6 @@ static inline void apply_blur_filter_to_region(Region *region, int size,
       }
     }
 
-    // Apply blur on top part of image (10%)
     for (int j = size; j < height / 10 - size; j++) {
       for (int k = size; k < width - size; k++) {
         int t_r = 0;
@@ -82,7 +80,6 @@ static inline void apply_blur_filter_to_region(Region *region, int size,
       }
     }
 
-    // Copy the middle part of the image
     for (int j = height / 10 - size; j < height * 0.9 + size; j++) {
       for (int k = size; k < width - size; k++) {
         new_pixels[CONV(j, k, width)].r = p[CONV(j, k, width)].r;
@@ -91,7 +88,6 @@ static inline void apply_blur_filter_to_region(Region *region, int size,
       }
     }
 
-    // Apply blur on the bottom part of the image (10%)
     for (int j = height * 0.9 + size; j < height - size; j++) {
       for (int k = size; k < width - size; k++) {
         int t_r = 0;
@@ -115,7 +111,6 @@ static inline void apply_blur_filter_to_region(Region *region, int size,
       }
     }
 
-    // Check convergence and copy back
     for (int j = 1; j < height - 1; j++) {
       for (int k = 1; k < width - 1; k++) {
         float diff_r =
@@ -135,13 +130,12 @@ static inline void apply_blur_filter_to_region(Region *region, int size,
         p[CONV(j, k, width)].b = new_pixels[CONV(j, k, width)].b;
       }
     }
-
+    // TODO MPI ghost cell sync on each iteration
   } while (threshold > 0 && !end);
 
   free(new_pixels);
 }
 
-// Apply sobel filter to a single region
 static inline void apply_sobel_filter_to_region(Region *region) {
   if (!region || !region->p) {
     return;
@@ -199,7 +193,6 @@ static inline void apply_sobel_filter_to_region(Region *region) {
   free(sobel);
 }
 
-// Apply all filters to a region in sequence: gray -> blur -> sobel
 static inline void apply_all_filters_to_region(Region *region, int blur_size,
                                                int blur_threshold) {
   apply_gray_filter_to_region(region);
