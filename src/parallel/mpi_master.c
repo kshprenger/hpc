@@ -8,7 +8,6 @@
 #include <string.h>
 #include <sys/time.h>
 
-// Forward declaration of Slave function
 extern void Slave(void);
 
 // Helper function to compare regions for sorting by image_id then region_id
@@ -80,7 +79,6 @@ void Master(char *input_file, char *output_file) {
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
-  // ==================== LOAD GIF ====================
   gettimeofday(&t1, NULL);
 
   image = load_pixels(input_file);
@@ -97,7 +95,7 @@ void Master(char *input_file, char *output_file) {
 
   int n_images = image->n_images;
 
-  // ==================== SPECIAL CASE: Single rank ====================
+  // Special case: Single rank
   if (world_size == 1) {
     gettimeofday(&t1, NULL);
 
@@ -107,24 +105,16 @@ void Master(char *input_file, char *output_file) {
       Region *regions =
           Split(image->p[i], i, image->width[i], image->height[i], 1);
 
-      // Apply filters to the region
       apply_all_filters_to_region(&regions[0], 5, 20);
 
-      // Copy processed pixels back to image
       pixel *combined = Combine(regions, image->width[i], image->height[i], 1);
-      free(image->p[i]);
       image->p[i] = combined;
-
-      // Free region memory
-      free(regions[0].p);
-      free(regions);
     }
 
     gettimeofday(&t2, NULL);
     duration = (t2.tv_sec - t1.tv_sec) + ((t2.tv_usec - t1.tv_usec) / 1e6);
     printf("SOBEL done in %lf s\n", duration);
 
-    // Store output
     gettimeofday(&t1, NULL);
 
     if (!store_pixels(output_file, image)) {
@@ -139,11 +129,10 @@ void Master(char *input_file, char *output_file) {
     return;
   }
 
-  // ==================== MULTI-RANK: Create and distribute regions
-  // ====================
+  // Multi-rank execution of master
+
   gettimeofday(&t1, NULL);
 
-  // Prepare arrays to collect regions for each worker
   Region **worker_regions = (Region **)malloc(world_size * sizeof(Region *));
   int *worker_region_count = (int *)calloc(world_size, sizeof(int));
   int *worker_region_capacity = (int *)malloc(world_size * sizeof(int));
@@ -160,13 +149,12 @@ void Master(char *input_file, char *output_file) {
   // Round-robin counter for images that aren't split
   int rr_counter = 0;
 
-  // Iterate over all images and distribute regions
   for (int i = 0; i < n_images; i++) {
     Region *regions;
     int k_regions;
 
     if (n_images < world_size) {
-      // If images < ranks, split each image by rank count
+      // If images count < ranks, split each image by rank count
       k_regions = world_size;
       regions =
           Split(image->p[i], i, image->width[i], image->height[i], k_regions);
@@ -178,22 +166,18 @@ void Master(char *input_file, char *output_file) {
         regions =
             Split(image->p[i], i, image->width[i], image->height[i], k_regions);
       } else {
-        // No splitting - treat entire image as one region
-        k_regions = 1;
-        regions =
-            Split(image->p[i], i, image->width[i], image->height[i], k_regions);
+        // Entire goes to single rank without actual splitting
+        regions = Split(image->p[i], i, image->width[i], image->height[i], 1);
       }
     }
 
     total_regions += k_regions;
 
-    // Distribute regions to workers
+    // Assign regions to workers
     if (k_regions == world_size) {
-      // Each region goes to corresponding worker rank
       for (int r = 0; r < k_regions; r++) {
         int worker_id = r;
 
-        // Expand capacity if needed
         if (worker_region_count[worker_id] >=
             worker_region_capacity[worker_id]) {
           worker_region_capacity[worker_id] *= 2;
@@ -206,11 +190,11 @@ void Master(char *input_file, char *output_file) {
         worker_region_count[worker_id]++;
       }
     } else {
-      // k_regions == 1, assign whole image to a worker (round-robin)
+      // k_regions == 1, assign whole image to a single worker
+      // in round-robin manner
       int worker_id = rr_counter % world_size;
       rr_counter++;
 
-      // Expand capacity if needed
       if (worker_region_count[worker_id] >= worker_region_capacity[worker_id]) {
         worker_region_capacity[worker_id] *= 2;
         worker_regions[worker_id] = (Region *)realloc(
@@ -221,35 +205,28 @@ void Master(char *input_file, char *output_file) {
       worker_regions[worker_id][worker_region_count[worker_id]] = regions[0];
       worker_region_count[worker_id]++;
     }
-
-    // Free the regions array (but not the pixel data - it's now owned by
-    // worker_regions)
-    free(regions);
   }
 
-  // ==================== SEND BATCH OF REGIONS TO WORKERS (rank > 0)
-  // ====================
-  for (int w = 1; w < world_size; w++) {
+  // Transmit region batches
+  for (int w = 1; w < world_size; w++) { // world_size >= 2
     int count = worker_region_count[w];
 
-    // Send count of regions first
+    // Send regions count
     MPI_Send(&count, 1, MPI_INT, w, 0, MPI_COMM_WORLD);
 
     if (count > 0) {
       // Calculate buffer size and pack all regions into one buffer
+      // (optimization)
       int buffer_size = calculate_batch_buffer_size(worker_regions[w], count);
       char *send_buffer = (char *)malloc(buffer_size);
 
       pack_regions(worker_regions[w], count, send_buffer, buffer_size,
                    MPI_COMM_WORLD);
 
-      // Send buffer size, then the packed buffer
+      // Send buffer size, then packed buffer
       MPI_Send(&buffer_size, 1, MPI_INT, w, 1, MPI_COMM_WORLD);
       MPI_Send(send_buffer, buffer_size, MPI_PACKED, w, 2, MPI_COMM_WORLD);
 
-      free(send_buffer);
-
-      // Free the pixel data after sending
       for (int r = 0; r < count; r++) {
         free(worker_regions[w][r].p);
         worker_regions[w][r].p = NULL;
@@ -257,8 +234,7 @@ void Master(char *input_file, char *output_file) {
     }
   }
 
-  // ==================== PROCESS MASTER'S OWN REGIONS LOCALLY
-  // ====================
+  // Master does not send regions to itself, it just process it locally
   int master_count = worker_region_count[0];
   Region *master_regions = worker_regions[0];
 
@@ -266,18 +242,16 @@ void Master(char *input_file, char *output_file) {
     apply_all_filters_to_region(&master_regions[r], 5, 20);
   }
 
-  // ==================== RECEIVE PROCESSED REGIONS FROM WORKERS
-  // ====================
+  // Gather work from other workers
   Region *all_processed_regions =
       (Region *)malloc(total_regions * sizeof(Region));
   int processed_idx = 0;
 
-  // Copy master's processed regions
   for (int r = 0; r < master_count; r++) {
     all_processed_regions[processed_idx++] = master_regions[r];
   }
 
-  // Receive processed regions from each worker (single recv per worker)
+  // Receive processed regions from each worker (single MPI call again)
   for (int w = 1; w < world_size; w++) {
     int count = worker_region_count[w];
 
@@ -291,11 +265,9 @@ void Master(char *input_file, char *output_file) {
       MPI_Recv(recv_buffer, buffer_size, MPI_PACKED, w, 4, MPI_COMM_WORLD,
                MPI_STATUS_IGNORE);
 
-      // Unpack regions from buffer
       unpack_regions(&all_processed_regions[processed_idx], count, recv_buffer,
                      buffer_size, MPI_COMM_WORLD);
 
-      free(recv_buffer);
       processed_idx += count;
     }
   }
@@ -304,16 +276,14 @@ void Master(char *input_file, char *output_file) {
   duration = (t2.tv_sec - t1.tv_sec) + ((t2.tv_usec - t1.tv_usec) / 1e6);
   printf("SOBEL done in %lf s\n", duration);
 
-  // ==================== COMBINE REGIONS BACK INTO IMAGES ====================
   gettimeofday(&t1, NULL);
 
-  // Sort all regions by image_id then region_id
+  // Sort all regions by image_id then by region_id
   qsort(all_processed_regions, total_regions, sizeof(Region), compare_regions);
 
-  // Group regions by image_id and combine
+  // Combine!
   int region_idx = 0;
   for (int i = 0; i < n_images; i++) {
-    // Find all regions for this image
     int image_region_count = 0;
     int start_idx = region_idx;
 
@@ -328,16 +298,13 @@ void Master(char *input_file, char *output_file) {
       continue;
     }
 
-    // Combine regions back into the image
     int k_regions = all_processed_regions[start_idx].k_regions;
     pixel *combined = Combine(&all_processed_regions[start_idx],
                               image->width[i], image->height[i], k_regions);
 
-    // Replace the original image pixels
     free(image->p[i]);
     image->p[i] = combined;
 
-    // Free region pixel data
     for (int r = start_idx; r < start_idx + image_region_count; r++) {
       if (all_processed_regions[r].p) {
         free(all_processed_regions[r].p);
@@ -346,7 +313,6 @@ void Master(char *input_file, char *output_file) {
     }
   }
 
-  // ==================== STORE OUTPUT GIF ====================
   if (!store_pixels(output_file, image)) {
     fprintf(stderr, "Master: Failed to store GIF to %s\n", output_file);
     MPI_Abort(MPI_COMM_WORLD, 1);
@@ -355,14 +321,4 @@ void Master(char *input_file, char *output_file) {
   gettimeofday(&t2, NULL);
   duration = (t2.tv_sec - t1.tv_sec) + ((t2.tv_usec - t1.tv_usec) / 1e6);
   printf("Export done in %lf s in file %s\n", duration, output_file);
-
-  // ==================== CLEANUP ====================
-  free(all_processed_regions);
-
-  for (int w = 0; w < world_size; w++) {
-    free(worker_regions[w]);
-  }
-  free(worker_regions);
-  free(worker_region_count);
-  free(worker_region_capacity);
 }
