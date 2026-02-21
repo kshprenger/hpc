@@ -21,6 +21,56 @@ static int compare_regions(const void *a, const void *b) {
   return ra->region_id - rb->region_id;
 }
 
+// Calculate total buffer size needed for a batch of regions
+static int calculate_batch_buffer_size(Region *regions, int count) {
+  // For each region: 5 ints (metadata) + pixel data
+  int total_size = 0;
+  for (int i = 0; i < count; i++) {
+    total_size += 5 * sizeof(int); // metadata
+    total_size +=
+        regions[i].region_width * regions[i].region_height * sizeof(pixel);
+  }
+  return total_size;
+}
+
+// Pack a batch of regions into a single buffer
+static void pack_regions(Region *regions, int count, char *buffer,
+                         int buffer_size, MPI_Comm comm) {
+  int position = 0;
+  for (int i = 0; i < count; i++) {
+    int metadata[5] = {regions[i].image_id, regions[i].region_id,
+                       regions[i].region_width, regions[i].region_height,
+                       regions[i].k_regions};
+    MPI_Pack(metadata, 5, MPI_INT, buffer, buffer_size, &position, comm);
+
+    int pixel_count = regions[i].region_width * regions[i].region_height;
+    MPI_Pack(regions[i].p, pixel_count * sizeof(pixel), MPI_BYTE, buffer,
+             buffer_size, &position, comm);
+  }
+}
+
+// Unpack a batch of regions from a single buffer
+static void unpack_regions(Region *regions, int count, char *buffer,
+                           int buffer_size, MPI_Comm comm) {
+  int position = 0;
+  for (int i = 0; i < count; i++) {
+    int metadata[5];
+    MPI_Unpack(buffer, buffer_size, &position, metadata, 5, MPI_INT, comm);
+
+    regions[i].image_id = metadata[0];
+    regions[i].region_id = metadata[1];
+    regions[i].region_width = metadata[2];
+    regions[i].region_height = metadata[3];
+    regions[i].k_regions = metadata[4];
+
+    int pixel_count = regions[i].region_width * regions[i].region_height;
+    regions[i].p = (pixel *)malloc(pixel_count * sizeof(pixel));
+
+    MPI_Unpack(buffer, buffer_size, &position, regions[i].p,
+               pixel_count * sizeof(pixel), MPI_BYTE, comm);
+  }
+}
+
 void Master(char *input_file, char *output_file) {
   int rank, world_size;
   animated_gif *image = NULL;
@@ -177,32 +227,33 @@ void Master(char *input_file, char *output_file) {
     free(regions);
   }
 
-  // ==================== SEND REGIONS TO WORKERS (rank > 0)
+  // ==================== SEND BATCH OF REGIONS TO WORKERS (rank > 0)
   // ====================
   for (int w = 1; w < world_size; w++) {
     int count = worker_region_count[w];
 
-    // Send count of regions to worker
+    // Send count of regions first
     MPI_Send(&count, 1, MPI_INT, w, 0, MPI_COMM_WORLD);
 
-    // Send each region to worker
-    for (int r = 0; r < count; r++) {
-      Region *region = &worker_regions[w][r];
+    if (count > 0) {
+      // Calculate buffer size and pack all regions into one buffer
+      int buffer_size = calculate_batch_buffer_size(worker_regions[w], count);
+      char *send_buffer = (char *)malloc(buffer_size);
 
-      // Send region metadata
-      int metadata[5] = {region->image_id, region->region_id,
-                         region->region_width, region->region_height,
-                         region->k_regions};
-      MPI_Send(metadata, 5, MPI_INT, w, 1, MPI_COMM_WORLD);
+      pack_regions(worker_regions[w], count, send_buffer, buffer_size,
+                   MPI_COMM_WORLD);
 
-      // Send pixel data
-      int pixel_count = region->region_width * region->region_height;
-      MPI_Send(region->p, pixel_count * sizeof(pixel), MPI_BYTE, w, 2,
-               MPI_COMM_WORLD);
+      // Send buffer size, then the packed buffer
+      MPI_Send(&buffer_size, 1, MPI_INT, w, 1, MPI_COMM_WORLD);
+      MPI_Send(send_buffer, buffer_size, MPI_PACKED, w, 2, MPI_COMM_WORLD);
 
-      // Free the pixel data after sending (worker will have its own copy)
-      free(region->p);
-      region->p = NULL;
+      free(send_buffer);
+
+      // Free the pixel data after sending
+      for (int r = 0; r < count; r++) {
+        free(worker_regions[w][r].p);
+        worker_regions[w][r].p = NULL;
+      }
     }
   }
 
@@ -216,7 +267,7 @@ void Master(char *input_file, char *output_file) {
   }
 
   // ==================== RECEIVE PROCESSED REGIONS FROM WORKERS
-  // ==================== Allocate array to hold all processed regions
+  // ====================
   Region *all_processed_regions =
       (Region *)malloc(total_regions * sizeof(Region));
   int processed_idx = 0;
@@ -226,29 +277,26 @@ void Master(char *input_file, char *output_file) {
     all_processed_regions[processed_idx++] = master_regions[r];
   }
 
-  // Receive processed regions from each worker
+  // Receive processed regions from each worker (single recv per worker)
   for (int w = 1; w < world_size; w++) {
     int count = worker_region_count[w];
 
-    for (int r = 0; r < count; r++) {
-      // Receive region metadata
-      int metadata[5];
-      MPI_Recv(metadata, 5, MPI_INT, w, 3, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    if (count > 0) {
+      // Receive buffer size, then the packed buffer
+      int buffer_size;
+      MPI_Recv(&buffer_size, 1, MPI_INT, w, 3, MPI_COMM_WORLD,
+               MPI_STATUS_IGNORE);
 
-      Region *region = &all_processed_regions[processed_idx];
-      region->image_id = metadata[0];
-      region->region_id = metadata[1];
-      region->region_width = metadata[2];
-      region->region_height = metadata[3];
-      region->k_regions = metadata[4];
+      char *recv_buffer = (char *)malloc(buffer_size);
+      MPI_Recv(recv_buffer, buffer_size, MPI_PACKED, w, 4, MPI_COMM_WORLD,
+               MPI_STATUS_IGNORE);
 
-      // Allocate and receive pixel data
-      int pixel_count = region->region_width * region->region_height;
-      region->p = (pixel *)malloc(pixel_count * sizeof(pixel));
-      MPI_Recv(region->p, pixel_count * sizeof(pixel), MPI_BYTE, w, 4,
-               MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+      // Unpack regions from buffer
+      unpack_regions(&all_processed_regions[processed_idx], count, recv_buffer,
+                     buffer_size, MPI_COMM_WORLD);
 
-      processed_idx++;
+      free(recv_buffer);
+      processed_idx += count;
     }
   }
 
