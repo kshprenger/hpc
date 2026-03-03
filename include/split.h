@@ -1,7 +1,6 @@
 #ifndef SPLIT_H
 #define SPLIT_H
 #include "gif_model.h"
-#include <_abort.h>
 #include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>
