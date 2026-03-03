@@ -4,5 +4,5 @@ obj/*
 obj_parallel/*
 sobelf
 parallel_sobelf
+obj*
 .cache
-.clangd

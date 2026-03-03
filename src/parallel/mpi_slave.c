@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "sobel_cuda.h"
+
 #define TAG_COMMAND 0
 #define TAG_REGION_COUNT 1
 #define TAG_BUFFER_SIZE 2
@@ -16,6 +18,9 @@
 #define CMD_PROCESS_SPLIT_IMAGE 1
 #define CMD_PROCESS_BATCH 2
 #define CMD_TERMINATE 3
+
+// Global flag for GPU availability, set once at startup
+static int g_use_gpu = 0;
 
 static int calculate_batch_buffer_size(Region *regions, int count) {
   int total_size = 0;
@@ -63,6 +68,20 @@ static void unpack_regions(Region *regions, int count, char *buffer,
   }
 }
 
+// Apply filters with GPU dispatch for all filters if available
+static void apply_filters_with_gpu_dispatch(Region *region, int blur_size,
+                                            int blur_threshold) {
+  apply_all_filters_to_region_gpu(region, blur_size, blur_threshold, g_use_gpu);
+}
+
+// Apply filters with MPI sync and GPU dispatch for all filters if available
+static void apply_filters_mpi_with_gpu_dispatch(Region *region, int blur_size,
+                                                int blur_threshold,
+                                                MPI_Comm comm) {
+  apply_all_filters_to_region_mpi_gpu(region, blur_size, blur_threshold, comm,
+                                      g_use_gpu);
+}
+
 // Handle processing of a split image (with ghost cell synchronization)
 static void handle_split_image(int rank) {
   int buffer_size;
@@ -77,7 +96,7 @@ static void handle_split_image(int rank) {
   unpack_regions(&region, 1, recv_buffer, buffer_size, MPI_COMM_WORLD);
   free(recv_buffer);
 
-  apply_all_filters_to_region_mpi(&region, 5, 20, MPI_COMM_WORLD);
+  apply_filters_mpi_with_gpu_dispatch(&region, 5, 20, MPI_COMM_WORLD);
 
   int send_buffer_size = calculate_batch_buffer_size(&region, 1);
   char *send_buffer = (char *)malloc(send_buffer_size);
@@ -114,7 +133,7 @@ static void handle_batch(int rank) {
   free(recv_buffer);
 
   for (int r = 0; r < region_count; r++) {
-    apply_all_filters_to_region(&regions[r], 5, 20);
+    apply_filters_with_gpu_dispatch(&regions[r], 5, 20);
   }
 
   int send_buffer_size = calculate_batch_buffer_size(regions, region_count);
@@ -139,6 +158,18 @@ static void handle_batch(int rank) {
 void Slave(void) {
   int rank;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+  g_use_gpu = has_nvidia_gpu();
+  if (g_use_gpu) {
+#ifdef USE_CUDA
+    char device_name[256];
+    cuda_get_device_name(device_name, sizeof(device_name));
+    printf("[Rank %d] CUDA GPU detected: %s - using GPU for all filters\n",
+           rank, device_name);
+#endif
+  } else {
+    printf("[Rank %d] No CUDA GPU - using OpenMP for all filters\n", rank);
+  }
 
   while (1) {
     int cmd;

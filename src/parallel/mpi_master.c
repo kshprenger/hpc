@@ -8,6 +8,8 @@
 #include <string.h>
 #include <sys/time.h>
 
+#include "sobel_cuda.h"
+
 #define TAG_COMMAND 0
 #define TAG_REGION_COUNT 1
 #define TAG_BUFFER_SIZE 2
@@ -19,6 +21,9 @@
 #define CMD_PROCESS_SPLIT_IMAGE 1
 #define CMD_PROCESS_BATCH 2
 #define CMD_TERMINATE 3
+
+// Global flag for GPU availability, set once at startup
+static int g_use_gpu = 0;
 
 static int compare_regions(const void *a, const void *b) {
   const Region *ra = (const Region *)a;
@@ -77,6 +82,20 @@ static void unpack_regions(Region *regions, int count, char *buffer,
   }
 }
 
+// Apply filters with GPU dispatch for all filters if available
+static void apply_filters_with_gpu_dispatch(Region *region, int blur_size,
+                                            int blur_threshold) {
+  apply_all_filters_to_region_gpu(region, blur_size, blur_threshold, g_use_gpu);
+}
+
+// Apply filters with MPI sync and GPU dispatch for all filters if available
+static void apply_filters_mpi_with_gpu_dispatch(Region *region, int blur_size,
+                                                int blur_threshold,
+                                                MPI_Comm comm) {
+  apply_all_filters_to_region_mpi_gpu(region, blur_size, blur_threshold, comm,
+                                      g_use_gpu);
+}
+
 static void process_split_image(animated_gif *image, int image_idx,
                                 int world_size, Region **result_regions) {
   Region *regions =
@@ -103,7 +122,7 @@ static void process_split_image(animated_gif *image, int image_idx,
 
   Region *master_region = &regions[0];
 
-  apply_all_filters_to_region_mpi(master_region, 5, 20, MPI_COMM_WORLD);
+  apply_filters_mpi_with_gpu_dispatch(master_region, 5, 20, MPI_COMM_WORLD);
 
   *result_regions = (Region *)malloc(world_size * sizeof(Region));
   (*result_regions)[0] = *master_region;
@@ -182,7 +201,7 @@ static void process_nonsplit_images_batch(animated_gif *image,
 
   int master_count = worker_counts[0];
   for (int r = 0; r < master_count; r++) {
-    apply_all_filters_to_region(&worker_regions[0][r], 5, 20);
+    apply_filters_with_gpu_dispatch(&worker_regions[0][r], 5, 20);
   }
 
   *result_count = num_images;
@@ -227,6 +246,18 @@ void Master(char *input_file, char *output_file) {
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
+  g_use_gpu = has_nvidia_gpu();
+  if (g_use_gpu) {
+#ifdef USE_CUDA
+    char device_name[256];
+    cuda_get_device_name(device_name, sizeof(device_name));
+    printf("[Master] CUDA GPU detected: %s - using GPU for all filters\n",
+           device_name);
+#endif
+  } else {
+    printf("[Master] No CUDA GPU - using OpenMP for all filters\n");
+  }
+
   gettimeofday(&t1, NULL);
 
   image = load_pixels(input_file);
@@ -243,14 +274,13 @@ void Master(char *input_file, char *output_file) {
 
   int n_images = image->n_images;
 
-  // Special case: Single rank - no MPI communication
   if (world_size == 1) {
     gettimeofday(&t1, NULL);
 
     for (int i = 0; i < n_images; i++) {
       Region *regions =
           Split(image->p[i], i, image->width[i], image->height[i], 1);
-      apply_all_filters_to_region(&regions[0], 5, 20);
+      apply_filters_with_gpu_dispatch(&regions[0], 5, 20);
       pixel *combined = Combine(regions, image->width[i], image->height[i], 1);
       free(image->p[i]);
       image->p[i] = combined;
