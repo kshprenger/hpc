@@ -48,8 +48,8 @@ static inline int blur_iteration(Region *region, pixel *new_pixels, int size,
     }
   }
 
-  int x0 = GHOST_WIDTH;
-  int x1 = width - GHOST_WIDTH;
+  int x0 = region->region_id == 0? 1 : GHOST_WIDTH;
+  int x1 = region->region_id == region->k_regions - 1? width - 1 : width - GHOST_WIDTH;
 
   int blur_x0 = (x0 > size) ? x0 : size;
   int blur_x1 = (x1 < width - size) ? x1 : (width - size);
@@ -306,8 +306,8 @@ static inline void apply_sobel_filter_to_region(Region *region) {
     }
   }
 
-  int x0 = GHOST_WIDTH;
-  int x1 = width - GHOST_WIDTH;
+  int x0 = region->region_id == 0? 1 : GHOST_WIDTH;
+  int x1 = region->region_id == region->k_regions - 1? width - 1 : width - GHOST_WIDTH;
 
   #pragma omp parallel for collapse(2) schedule(static)
   for (int j = 1; j < height - 1; j++) {
