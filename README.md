@@ -152,6 +152,12 @@ More specifically:
 - `--cuda off` disables CUDA.
 - `--cuda force` forces the use of CUDA.
 
+For hybrid **MPI + OpenMP** execution, we specifically recommend launching the program with:
+
+    OMP_PROC_BIND=false mpirun --bind-to none -np <num_processes> ./parallel_sobelf ...
+
+This avoids overly strict process/thread binding and gave better performance in our tests when MPI and OpenMP were used together.
+
 The serial version can be run as:
 
     ./sobelf input.gif output.gif
