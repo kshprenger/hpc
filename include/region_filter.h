@@ -4,22 +4,24 @@
 #include "gif_math.h"
 #include "gif_model.h"
 #include "split.h"
+#include "runtime_config.h"
 #include <math.h>
 #include <mpi.h>
+#include <stdio.h>
 #include <omp.h>
 #include <stdlib.h>
 
 #define GHOST_WIDTH 5
 
 // Apply gray filter to a single region
-static inline void apply_gray_filter_to_region(Region *region) {
+static inline void apply_gray_filter_to_region(Region *region, openmp_mode_t openmp_mode) {
   if (!region || !region->p) {
     return;
   }
 
   int total_pixels = region->region_width * region->region_height;
 
-#pragma omp parallel for schedule(static)
+  #pragma omp parallel for schedule(static) if(openmp_mode != OPENMP_MODE_OFF)
   for (int j = 0; j < total_pixels; j++) {
     int moy = (region->p[j].r + region->p[j].g + region->p[j].b) / 3;
     if (moy < 0)
@@ -35,13 +37,13 @@ static inline void apply_gray_filter_to_region(Region *region) {
 
 // Perform one blur iteration
 static inline int blur_iteration(Region *region, pixel *new_pixels, int size,
-                                 int threshold) {
+                                 int threshold, openmp_mode_t openmp_mode) {
   int width = region->region_width;
   int height = region->region_height;
   pixel *p = region->p;
   const int denom = (2 * size + 1) * (2 * size + 1);
 
-#pragma omp parallel for collapse(2) schedule(static)
+  #pragma omp parallel for collapse(2) schedule(static) if(openmp_mode != OPENMP_MODE_OFF)
   for (int j = 0; j < height; j++) {
     for (int k = 0; k < width; k++) {
       new_pixels[CONV(j, k, width)] = p[CONV(j, k, width)];
@@ -54,7 +56,7 @@ static inline int blur_iteration(Region *region, pixel *new_pixels, int size,
   int blur_x0 = (x0 > size) ? x0 : size;
   int blur_x1 = (x1 < width - size) ? x1 : (width - size);
 
-#pragma omp parallel for collapse(2) schedule(static)
+  #pragma omp parallel for collapse(2) schedule(static) if(openmp_mode != OPENMP_MODE_OFF)
   for (int j = size; j < height / 10 - size; j++) {
     for (int k = blur_x0; k < blur_x1; k++) {
       int t_r = 0, t_g = 0, t_b = 0;
@@ -75,7 +77,7 @@ static inline int blur_iteration(Region *region, pixel *new_pixels, int size,
     }
   }
 
-#pragma omp parallel for collapse(2) schedule(static)
+  #pragma omp parallel for collapse(2) schedule(static) if(openmp_mode != OPENMP_MODE_OFF)
   for (int j = (int)(height * 0.9) + size; j < height - size; j++) {
     for (int k = blur_x0; k < blur_x1; k++) {
       int t_r = 0, t_g = 0, t_b = 0;
@@ -98,7 +100,7 @@ static inline int blur_iteration(Region *region, pixel *new_pixels, int size,
 
   int local_end = 1;
 
-#pragma omp parallel for collapse(2) reduction(&& : local_end) schedule(static)
+  #pragma omp parallel for collapse(2) reduction(&&:local_end) schedule(static) if(openmp_mode != OPENMP_MODE_OFF )
   for (int j = 1; j < height - 1; j++) {
     for (int k = x0; k < x1; k++) {
       int idx = CONV(j, k, width);
@@ -115,7 +117,7 @@ static inline int blur_iteration(Region *region, pixel *new_pixels, int size,
     }
   }
 
-#pragma omp parallel for collapse(2) schedule(static)
+  #pragma omp parallel for collapse(2) schedule(static) if(openmp_mode != OPENMP_MODE_OFF)
   for (int j = 1; j < height - 1; j++) {
     for (int k = x0; k < x1; k++) {
       p[CONV(j, k, width)] = new_pixels[CONV(j, k, width)];
@@ -126,7 +128,7 @@ static inline int blur_iteration(Region *region, pixel *new_pixels, int size,
 }
 
 // Exchange ghost cells with neighboring workers
-static inline void exchange_ghost_cells(Region *region, MPI_Comm comm) {
+static inline void exchange_ghost_cells(Region *region, MPI_Comm comm, openmp_mode_t openmp_mode) {
   int region_id = region->region_id;
   int k_regions = region->k_regions;
   int width = region->region_width;
@@ -211,7 +213,7 @@ static inline void exchange_ghost_cells(Region *region, MPI_Comm comm) {
 
 static inline void apply_blur_filter_to_region_mpi(Region *region, int size,
                                                    int threshold,
-                                                   MPI_Comm comm) {
+                                                   MPI_Comm comm, openmp_mode_t openmp_mode) {
   if (!region || !region->p) {
     return;
   }
@@ -228,12 +230,13 @@ static inline void apply_blur_filter_to_region_mpi(Region *region, int size,
   int global_end = 0;
 
   do {
-    int local_end = blur_iteration(region, new_pixels, size, threshold);
+    int local_end = blur_iteration(region, new_pixels, size, threshold, openmp_mode);
 
     // If image is split across multiple workers, sync ghost cells and
     // convergence
     if (k_regions > 1) {
-      exchange_ghost_cells(region, comm);
+      // Exchange ghost cells with neighbors
+      exchange_ghost_cells(region, comm, openmp_mode);
 
       MPI_Allreduce(&local_end, &global_end, 1, MPI_INT, MPI_LAND, comm);
     } else {
@@ -246,7 +249,7 @@ static inline void apply_blur_filter_to_region_mpi(Region *region, int size,
 }
 
 static inline void apply_blur_filter_to_region(Region *region, int size,
-                                               int threshold) {
+                                               int threshold, openmp_mode_t openmp_mode) {
   if (!region || !region->p) {
     return;
   }
@@ -262,13 +265,13 @@ static inline void apply_blur_filter_to_region(Region *region, int size,
   int end = 0;
 
   do {
-    end = blur_iteration(region, new_pixels, size, threshold);
+    end = blur_iteration(region, new_pixels, size, threshold, openmp_mode);
   } while (threshold > 0 && !end);
 
   free(new_pixels);
 }
 
-static inline void apply_sobel_filter_to_region(Region *region) {
+static inline void apply_sobel_filter_to_region(Region *region, openmp_mode_t openmp_mode) {
   if (!region || !region->p) {
     return;
   }
@@ -323,19 +326,75 @@ static inline void apply_sobel_filter_to_region(Region *region) {
 }
 
 static inline void apply_all_filters_to_region(Region *region, int blur_size,
-                                               int blur_threshold) {
-  apply_gray_filter_to_region(region);
-  apply_blur_filter_to_region(region, blur_size, blur_threshold);
-  apply_sobel_filter_to_region(region);
+                                               int blur_threshold, openmp_mode_t openmp_mode) {
+  openmp_mode_t sg_openmp_mode = openmp_mode;
+  int num_threads = omp_get_max_threads();
+  if (openmp_mode == OPENMP_MODE_AUTO ) {
+    if (region->region_height * region->region_width > OPENMP_THRESHOLD 
+      && num_threads > OPENMP_THREADS_THRESHOLD) {
+          sg_openmp_mode = OPENMP_MODE_FORCE;
+    } else {
+          sg_openmp_mode = OPENMP_MODE_OFF;
+    }
+  }
+
+  if (sg_openmp_mode != OPENMP_MODE_OFF) {
+    printf("Applying filters to region %d of image %d with OpenMP parallelization using %d threads\n",
+           region->region_id, region->image_id, num_threads);
+  }
+  else {
+    printf("Applying filters to region %d of image %d without OpenMP parallelization\n",
+           region->region_id, region->image_id);
+  }
+  
+  apply_gray_filter_to_region(region, sg_openmp_mode);
+  apply_blur_filter_to_region(region, blur_size, blur_threshold, sg_openmp_mode);
+  apply_sobel_filter_to_region(region, sg_openmp_mode);
 }
 
 static inline void apply_all_filters_to_region_mpi(Region *region,
                                                    int blur_size,
                                                    int blur_threshold,
-                                                   MPI_Comm comm) {
-  apply_gray_filter_to_region(region);
-  apply_blur_filter_to_region_mpi(region, blur_size, blur_threshold, comm);
-  apply_sobel_filter_to_region(region);
+                                                   MPI_Comm comm, openmp_mode_t openmp_mode) {
+  openmp_mode_t blur_openmp_mode = openmp_mode;
+  openmp_mode_t sg_openmp_mode = openmp_mode;
+  int num_threads = omp_get_max_threads();
+  if (openmp_mode == OPENMP_MODE_AUTO ) {
+     if (region->region_height * region->region_width > GHOST_OPENMP_THRESHOLD && 
+         num_threads > GHOST_OPENMP_THREADS_THRESHOLD) {
+         blur_openmp_mode = OPENMP_MODE_FORCE;
+     } else {
+         blur_openmp_mode = OPENMP_MODE_OFF;
+     }
+
+     if (region->region_height * region->region_width > OPENMP_THRESHOLD && 
+         num_threads > OPENMP_THREADS_THRESHOLD) {
+        sg_openmp_mode = OPENMP_MODE_FORCE;
+     } else {
+        sg_openmp_mode = OPENMP_MODE_OFF;
+     }
+  }
+  if (sg_openmp_mode != OPENMP_MODE_OFF) {
+    printf("Applying sobel/gray filters to region %d of image %d with OpenMP parallelization using %d threads\n",
+           region->region_id, region->image_id, num_threads);
+  }
+  else {
+    printf("Applying sobel/grayfilters to region %d of image %d without OpenMP parallelization\n",
+           region->region_id, region->image_id);
+  }
+
+  if (blur_openmp_mode != OPENMP_MODE_OFF) {
+    printf("Applying blur filter to region %d of image %d with OpenMP parallelization using %d threads\n",
+           region->region_id, region->image_id, num_threads);
+  }
+  else {
+    printf("Applying blur filter to region %d of image %d without OpenMP parallelization\n",
+           region->region_id, region->image_id);
+  }
+  
+  apply_gray_filter_to_region(region, sg_openmp_mode);
+  apply_blur_filter_to_region_mpi(region, blur_size, blur_threshold, comm, blur_openmp_mode);
+  apply_sobel_filter_to_region(region, sg_openmp_mode);
 }
 
 #endif

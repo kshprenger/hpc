@@ -1,6 +1,7 @@
 #include "gif_model.h"
 #include "region_filter.h"
 #include "split.h"
+#include "runtime_config.h"
 #include <mpi.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -70,20 +71,20 @@ static void unpack_regions(Region *regions, int count, char *buffer,
 
 // Apply filters with GPU dispatch for all filters if available
 static void apply_filters_with_gpu_dispatch(Region *region, int blur_size,
-                                            int blur_threshold) {
-  apply_all_filters_to_region_gpu(region, blur_size, blur_threshold, g_use_gpu);
+                                            int blur_threshold, runtime_config_t config) {
+  apply_all_filters_to_region_gpu(region, blur_size, blur_threshold, g_use_gpu, config);
 }
 
 // Apply filters with MPI sync and GPU dispatch for all filters if available
 static void apply_filters_mpi_with_gpu_dispatch(Region *region, int blur_size,
                                                 int blur_threshold,
-                                                MPI_Comm comm) {
+                                                MPI_Comm comm, runtime_config_t config) {
   apply_all_filters_to_region_mpi_gpu(region, blur_size, blur_threshold, comm,
-                                      g_use_gpu);
+                                      g_use_gpu, config);
 }
 
 // Handle processing of a split image (with ghost cell synchronization)
-static void handle_split_image(int rank) {
+static void handle_split_image(int rank, runtime_config_t config) {
   int buffer_size;
   MPI_Recv(&buffer_size, 1, MPI_INT, 0, TAG_BUFFER_SIZE, MPI_COMM_WORLD,
            MPI_STATUS_IGNORE);
@@ -96,8 +97,7 @@ static void handle_split_image(int rank) {
   unpack_regions(&region, 1, recv_buffer, buffer_size, MPI_COMM_WORLD);
   free(recv_buffer);
 
-  apply_filters_mpi_with_gpu_dispatch(&region, 5, 20, MPI_COMM_WORLD);
-
+  apply_filters_mpi_with_gpu_dispatch(&region, 5, 20, MPI_COMM_WORLD, config);
   int send_buffer_size = calculate_batch_buffer_size(&region, 1);
   char *send_buffer = (char *)malloc(send_buffer_size);
   pack_regions(&region, 1, send_buffer, send_buffer_size, MPI_COMM_WORLD);
@@ -110,7 +110,7 @@ static void handle_split_image(int rank) {
   free(region.p);
 }
 
-static void handle_batch(int rank) {
+static void handle_batch(int rank, runtime_config_t config) {
   int region_count;
   MPI_Recv(&region_count, 1, MPI_INT, 0, TAG_REGION_COUNT, MPI_COMM_WORLD,
            MPI_STATUS_IGNORE);
@@ -132,8 +132,9 @@ static void handle_batch(int rank) {
                  MPI_COMM_WORLD);
   free(recv_buffer);
 
+  // #pragma omp parallel for schedule(dynamic) if(openmp_mode != OPENMP_MODE_OFF && region_count > OPENMP_COARSE_THRESHOLD && omp_get_max_threads() > OPENMP_THREADS_THRESHOLD && regions[0].region_width * regions[0].region_height < OPENMP_THRESHOLD)
   for (int r = 0; r < region_count; r++) {
-    apply_filters_with_gpu_dispatch(&regions[r], 5, 20);
+    apply_filters_with_gpu_dispatch(&regions[r], 5, 20, config);
   }
 
   int send_buffer_size = calculate_batch_buffer_size(regions, region_count);
@@ -155,7 +156,7 @@ static void handle_batch(int rank) {
   free(regions);
 }
 
-void Slave(void) {
+void Slave(runtime_config_t config) {
   int rank;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
@@ -178,11 +179,11 @@ void Slave(void) {
 
     switch (cmd) {
     case CMD_PROCESS_SPLIT_IMAGE:
-      handle_split_image(rank);
+      handle_split_image(rank, config);
       break;
 
     case CMD_PROCESS_BATCH:
-      handle_batch(rank);
+      handle_batch(rank, config);
       break;
 
     case CMD_TERMINATE:

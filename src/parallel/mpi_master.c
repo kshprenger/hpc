@@ -1,6 +1,8 @@
 #include "gif_model.h"
 #include "persist_api.h"
 #include "region_filter.h"
+#include "runtime_config.h"
+
 #include "split.h"
 #include <mpi.h>
 #include <stdio.h>
@@ -21,6 +23,10 @@
 #define CMD_PROCESS_SPLIT_IMAGE 1
 #define CMD_PROCESS_BATCH 2
 #define CMD_TERMINATE 3
+
+#define MPI_TOTAL_THRESHOLD 60000
+#define MPI_OPENMP_THRESHOLD 1300000
+#define MPI_SPLIT_THRESHOLD 550
 
 // Global flag for GPU availability, set once at startup
 static int g_use_gpu = 0;
@@ -84,20 +90,20 @@ static void unpack_regions(Region *regions, int count, char *buffer,
 
 // Apply filters with GPU dispatch for all filters if available
 static void apply_filters_with_gpu_dispatch(Region *region, int blur_size,
-                                            int blur_threshold) {
-  apply_all_filters_to_region_gpu(region, blur_size, blur_threshold, g_use_gpu);
+                                            int blur_threshold, runtime_config_t config) {
+  apply_all_filters_to_region_gpu(region, blur_size, blur_threshold, g_use_gpu, config);
 }
 
 // Apply filters with MPI sync and GPU dispatch for all filters if available
 static void apply_filters_mpi_with_gpu_dispatch(Region *region, int blur_size,
                                                 int blur_threshold,
-                                                MPI_Comm comm) {
+                                                MPI_Comm comm, runtime_config_t config) {
   apply_all_filters_to_region_mpi_gpu(region, blur_size, blur_threshold, comm,
-                                      g_use_gpu);
+                                      g_use_gpu, config);
 }
 
 static void process_split_image(animated_gif *image, int image_idx,
-                                int world_size, Region **result_regions) {
+                                int world_size, Region **result_regions, runtime_config_t config) {
   Region *regions =
       Split(image->p[image_idx], image_idx, image->width[image_idx],
             image->height[image_idx], world_size);
@@ -122,7 +128,7 @@ static void process_split_image(animated_gif *image, int image_idx,
 
   Region *master_region = &regions[0];
 
-  apply_filters_mpi_with_gpu_dispatch(master_region, 5, 20, MPI_COMM_WORLD);
+  apply_filters_mpi_with_gpu_dispatch(master_region, 5, 20, MPI_COMM_WORLD, config);
 
   *result_regions = (Region *)malloc(world_size * sizeof(Region));
   (*result_regions)[0] = *master_region;
@@ -148,7 +154,7 @@ static void process_nonsplit_images_batch(animated_gif *image,
                                           int *image_indices, int num_images,
                                           int world_size,
                                           Region **result_regions,
-                                          int *result_count) {
+                                          int *result_count, runtime_config_t config) {
   Region *all_regions = (Region *)malloc(num_images * sizeof(Region));
   for (int i = 0; i < num_images; i++) {
     int idx = image_indices[i];
@@ -200,8 +206,10 @@ static void process_nonsplit_images_batch(animated_gif *image,
   }
 
   int master_count = worker_counts[0];
+
+  // #pragma omp parallel for schedule(dynamic) if(config.openmp_mode != OPENMP_MODE_OFF && master_count > OPENMP_COARSE_THRESHOLD && omp_get_max_threads() > OPENMP_THREADS_THRESHOLD && worker_regions[0][0].region_width * worker_regions[0][0].region_height < OPENMP_THRESHOLD)
   for (int r = 0; r < master_count; r++) {
-    apply_filters_with_gpu_dispatch(&worker_regions[0][r], 5, 20);
+    apply_filters_with_gpu_dispatch(&worker_regions[0][r], 5, 20, config);
   }
 
   *result_count = num_images;
@@ -237,7 +245,7 @@ static void process_nonsplit_images_batch(animated_gif *image,
   free(worker_counts);
 }
 
-void Master(char *input_file, char *output_file) {
+void Master(char *input_file, char *output_file, runtime_config_t config) {
   int rank, world_size;
   animated_gif *image = NULL;
   struct timeval t1, t2;
@@ -246,6 +254,10 @@ void Master(char *input_file, char *output_file) {
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
+  int use_mpi = 0;
+  int use_hybrid_split = 0;
+
+  
   g_use_gpu = has_nvidia_gpu();
   if (g_use_gpu) {
 #ifdef USE_CUDA
@@ -266,21 +278,64 @@ void Master(char *input_file, char *output_file) {
     MPI_Abort(MPI_COMM_WORLD, 1);
     return;
   }
+switch (config.mpi_mode) {
+  case MPI_MODE_OFF:
+    use_mpi = 0;
+    use_hybrid_split = 0;
+    break;
+  case MPI_MODE_FULL:
+    use_mpi = 1;
+    use_hybrid_split = 0;
+    break;
+  case MPI_MODE_HYBRID:
+    use_mpi = 1;
+    use_hybrid_split = 1;
+    break;
+  case MPI_MODE_AUTO:
+  default:
+    use_mpi = (world_size > 1 && MPI_TOTAL_THRESHOLD <= (long)image->width[0] * image->height[0] * image->n_images);
+    if(use_mpi && omp_get_max_threads() > OPENMP_THREADS_THRESHOLD && 
+       image->width[0] * image->height[0] * image->n_images <= MPI_OPENMP_THRESHOLD
+       && config.openmp_mode != OPENMP_MODE_OFF && image->width[0] * image->height[0] > OPENMP_THRESHOLD) {
+        printf("MPI auto mode: disabled in favor of OpenMP (world_size=%d, total_pixels=%ld)\n", world_size, (long)image->width[0] * image->height[0] * image->n_images);
+        use_mpi = 0; // Disable MPI if OpenMP can handle it efficiently
+    }
+
+    use_hybrid_split = (world_size > 1 && MPI_SPLIT_THRESHOLD <= (long)image->width[0]);
+    if (use_mpi && use_hybrid_split && g_use_gpu && config.cuda_mode != CUDA_MODE_OFF && image->width[0] * image->height[0] > CUDA_THRESHOLD) {
+        printf("MPI auto mode: disabled image splitting in favor of CUDA (world_size=%d, total_pixels=%ld)\n", world_size, (long)image->width[0] * image->height[0] * image->n_images);
+        use_hybrid_split = 0; // Disable image splitting if GPU can handle it efficiently
+    }
+    if (!use_mpi) {
+      printf("MPI auto mode: disabled (world_size=%d, total_pixels=%ld)\n", world_size, (long)image->width[0] * image->height[0] * image->n_images);
+    } else {
+      printf("MPI auto mode: enabled (world_size=%d, total_pixels=%ld)\n", world_size, (long)image->width[0] * image->height[0] * image->n_images);
+      
+      if (use_hybrid_split) {
+        printf("MPI hybrid split auto mode: enabled");
+      } else {
+        printf("MPI hybrid split auto mode: disabled ");
+      }
+    }
+    break;
+  }
 
   gettimeofday(&t2, NULL);
   duration = (t2.tv_sec - t1.tv_sec) + ((t2.tv_usec - t1.tv_usec) / 1e6);
-  printf("GIF loaded from file %s with %d image(s) in %lf s\n", input_file,
-         image->n_images, duration);
+  printf("GIF loaded from file %s with %d image(s) frame height %d  frame width %d in %lf s\n", input_file,
+         image->n_images, image->height[0], image->width[0], duration);
 
   int n_images = image->n_images;
 
-  if (world_size == 1) {
+  // Special case: Single rank - no MPI communication
+  if (world_size == 1 || !use_mpi) {
     gettimeofday(&t1, NULL);
 
+    // #pragma omp parallel for schedule(dynamic) if(config.openmp_mode != OPENMP_MODE_OFF && n_images > OPENMP_COARSE_THRESHOLD && omp_get_max_threads() > OPENMP_THREADS_THRESHOLD && image->width[0] * image->height[0] < OPENMP_THRESHOLD)
     for (int i = 0; i < n_images; i++) {
       Region *regions =
           Split(image->p[i], i, image->width[i], image->height[i], 1);
-      apply_filters_with_gpu_dispatch(&regions[0], 5, 20);
+      apply_filters_with_gpu_dispatch(&regions[0], 5, 20, config);
       pixel *combined = Combine(regions, image->width[i], image->height[i], 1);
       free(image->p[i]);
       image->p[i] = combined;
@@ -299,6 +354,13 @@ void Master(char *input_file, char *output_file) {
       return;
     }
 
+    if (world_size > 1) {
+      int cmd = CMD_TERMINATE;
+      for (int w = 1; w < world_size; w++) {
+        MPI_Send(&cmd, 1, MPI_INT, w, TAG_COMMAND, MPI_COMM_WORLD);
+      }
+    }
+
     return;
   }
 
@@ -310,17 +372,23 @@ void Master(char *input_file, char *output_file) {
   int num_split = 0;
   int num_nonsplit = 0;
 
-  if (n_images < world_size) {
+  if (!use_hybrid_split) {
     for (int i = 0; i < n_images; i++) {
-      split_images[num_split++] = i;
+      nonsplit_images[num_nonsplit++] = i;
     }
   } else {
-    int remainder = n_images % world_size;
-    for (int i = 0; i < remainder; i++) {
-      split_images[num_split++] = i;
-    }
-    for (int i = remainder; i < n_images; i++) {
-      nonsplit_images[num_nonsplit++] = i;
+    if (n_images < world_size) {
+      for (int i = 0; i < n_images; i++) {
+        split_images[num_split++] = i;
+      }
+    } else {
+      int remainder = n_images % world_size;
+      for (int i = 0; i < remainder; i++) {
+        split_images[num_split++] = i;
+      }
+      for (int i = remainder; i < n_images; i++) {
+        nonsplit_images[num_nonsplit++] = i;
+      }
     }
   }
 
@@ -329,10 +397,9 @@ void Master(char *input_file, char *output_file) {
   int total_results = 0;
 
   // Process spliTted images one at a time (requires ghost cell sync)
-  // Parallelize???
   for (int i = 0; i < num_split; i++) {
     Region *split_results;
-    process_split_image(image, split_images[i], world_size, &split_results);
+    process_split_image(image, split_images[i], world_size, &split_results, config);
 
     for (int r = 0; r < world_size; r++) {
       all_results[total_results++] = split_results[r];
@@ -345,7 +412,7 @@ void Master(char *input_file, char *output_file) {
     Region *batch_results;
     int batch_count;
     process_nonsplit_images_batch(image, nonsplit_images, num_nonsplit,
-                                  world_size, &batch_results, &batch_count);
+                                  world_size, &batch_results, &batch_count, config);
 
     for (int r = 0; r < batch_count; r++) {
       all_results[total_results++] = batch_results[r];

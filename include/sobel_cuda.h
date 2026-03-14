@@ -54,9 +54,9 @@ static inline void print_gpu_info(int mpi_rank) {
 }
 
 static inline void apply_sobel_filter_dispatch(animated_gif *image,
-                                               int use_gpu) {
+                                               int use_gpu, runtime_config_t config) {
 #ifdef USE_CUDA
-  if (use_gpu && cuda_is_available()) {
+  if (use_gpu && cuda_is_available() && config.cuda_mode != CUDA_MODE_OFF) {
     apply_sobel_filter_cuda(image);
   } else {
     apply_sobel_filter(image);
@@ -68,12 +68,12 @@ static inline void apply_sobel_filter_dispatch(animated_gif *image,
 }
 
 static inline void apply_gray_filter_to_region_dispatch(Region *region,
-                                                        int use_gpu) {
+                                                        int use_gpu, runtime_config_t config) {
   if (!region || !region->p)
     return;
 
 #ifdef USE_CUDA
-  if (use_gpu && cuda_is_available()) {
+  if (use_gpu && cuda_is_available() && config.cuda_mode != CUDA_MODE_OFF) {
     apply_gray_filter_to_region_cuda(region->p, region->region_width,
                                      region->region_height);
     return;
@@ -81,17 +81,36 @@ static inline void apply_gray_filter_to_region_dispatch(Region *region,
 #else
   (void)use_gpu;
 #endif
-  apply_gray_filter_to_region(region);
+  openmp_mode_t sg_openmp_mode = config.openmp_mode;
+  int num_threads = omp_get_max_threads();
+  if (config.openmp_mode == OPENMP_MODE_AUTO ) {
+    if (region->region_height * region->region_width > OPENMP_THRESHOLD 
+      && num_threads > OPENMP_THREADS_THRESHOLD) {
+          sg_openmp_mode = OPENMP_MODE_FORCE;
+    } else {
+          sg_openmp_mode = OPENMP_MODE_OFF;
+    }
+  }
+
+  if (sg_openmp_mode != OPENMP_MODE_OFF) {
+    printf("Applying gray to region %d of image %d with OpenMP parallelization using %d threads\n",
+           region->region_id, region->image_id, num_threads);
+  }
+  else {
+    printf("Applying gray to region %d of image %d without OpenMP parallelization\n",
+           region->region_id, region->image_id);
+  }
+  apply_gray_filter_to_region(region, sg_openmp_mode);
 }
 
 static inline void apply_blur_filter_to_region_dispatch(Region *region,
                                                         int size, int threshold,
-                                                        int use_gpu) {
+                                                        int use_gpu, runtime_config_t config) {
   if (!region || !region->p)
     return;
 
 #ifdef USE_CUDA
-  if (use_gpu && cuda_is_available()) {
+  if (use_gpu && cuda_is_available() && config.cuda_mode != CUDA_MODE_OFF) {
     apply_blur_filter_to_region_cuda(region->p, region->region_width,
                                      region->region_height, size, threshold,
                                      region->region_id, region->k_regions);
@@ -100,11 +119,30 @@ static inline void apply_blur_filter_to_region_dispatch(Region *region,
 #else
   (void)use_gpu;
 #endif
-  apply_blur_filter_to_region(region, size, threshold);
+  openmp_mode_t sg_openmp_mode = config.openmp_mode;
+  int num_threads = omp_get_max_threads();
+  if (config.openmp_mode == OPENMP_MODE_AUTO ) {
+    if (region->region_height * region->region_width > OPENMP_THRESHOLD 
+      && num_threads > OPENMP_THREADS_THRESHOLD) {
+          sg_openmp_mode = OPENMP_MODE_FORCE;
+    } else {
+          sg_openmp_mode = OPENMP_MODE_OFF;
+    }
+  }
+
+  if (sg_openmp_mode != OPENMP_MODE_OFF) {
+    printf("Applying blur to region %d of image %d with OpenMP parallelization using %d threads\n",
+           region->region_id, region->image_id, num_threads);
+  }
+  else {
+    printf("Applying blur to region %d of image %d without OpenMP parallelization\n",
+           region->region_id, region->image_id);
+  }
+  apply_blur_filter_to_region(region, size, threshold, sg_openmp_mode);
 }
 
 static inline void apply_blur_filter_to_region_mpi_dispatch(
-    Region *region, int size, int threshold, MPI_Comm comm, int use_gpu) {
+    Region *region, int size, int threshold, MPI_Comm comm, int use_gpu, runtime_config_t config) {
   if (!region || !region->p)
     return;
 
@@ -117,25 +155,48 @@ static inline void apply_blur_filter_to_region_mpi_dispatch(
    * correctness.  Single-region images can safely use CUDA.
    */
 #ifdef USE_CUDA
-  if (use_gpu && cuda_is_available() && region->k_regions == 1) {
+  if (use_gpu && cuda_is_available() && region->k_regions == 1 && config.cuda_mode != CUDA_MODE_OFF) {
     apply_blur_filter_to_region_cuda(region->p, region->region_width,
                                      region->region_height, size, threshold,
                                      region->region_id, region->k_regions);
     return;
   }
+  else if (region->k_regions > 1) {
+    printf("Region %d of image %d is part of a split image, skipping GPU acceleration for blur filter\n",
+           region->region_id, region->image_id, region->k_regions);
+  }
 #else
   (void)use_gpu;
 #endif
-  apply_blur_filter_to_region_mpi(region, size, threshold, comm);
+  openmp_mode_t blur_openmp_mode = config.openmp_mode;
+  if (config.openmp_mode == OPENMP_MODE_AUTO ) {
+     int num_threads = omp_get_max_threads();
+     if (region->region_height * region->region_width > GHOST_OPENMP_THRESHOLD && 
+         num_threads > GHOST_OPENMP_THREADS_THRESHOLD) {
+         blur_openmp_mode = OPENMP_MODE_FORCE;
+     } else {
+         blur_openmp_mode = OPENMP_MODE_OFF;
+     }
+  }
+  if (blur_openmp_mode != OPENMP_MODE_OFF) {
+    printf("Applying blur filter to region %d of image %d with OpenMP parallelization using %d threads\n",
+           region->region_id, region->image_id, omp_get_max_threads());
+  }
+  else {
+    printf("Applying blur filter to region %d of image %d without OpenMP parallelization\n",
+           region->region_id, region->image_id);
+  }
+  apply_blur_filter_to_region_mpi(region, size, threshold, comm, blur_openmp_mode);
 }
 
 static inline void apply_sobel_filter_to_region_dispatch(Region *region,
-                                                         int use_gpu) {
+                                                         int use_gpu, 
+                                                         runtime_config_t config) {
   if (!region || !region->p)
     return;
 
 #ifdef USE_CUDA
-  if (use_gpu && cuda_is_available()) {
+  if (use_gpu && cuda_is_available() && config.cuda_mode != CUDA_MODE_OFF) {
     apply_sobel_filter_to_region_cuda(region->p, region->region_width,
                                       region->region_height, GHOST_WIDTH,
                                       region->region_id, region->k_regions);
@@ -144,28 +205,71 @@ static inline void apply_sobel_filter_to_region_dispatch(Region *region,
 #else
   (void)use_gpu;
 #endif
-  apply_sobel_filter_to_region(region);
+  openmp_mode_t sg_openmp_mode = config.openmp_mode;
+  int num_threads = omp_get_max_threads();
+  if (config.openmp_mode == OPENMP_MODE_AUTO ) {
+    if (region->region_height * region->region_width > OPENMP_THRESHOLD 
+      && num_threads > OPENMP_THREADS_THRESHOLD) {
+          sg_openmp_mode = OPENMP_MODE_FORCE;
+    } else {
+          sg_openmp_mode = OPENMP_MODE_OFF;
+    }
+  }
+
+  if (sg_openmp_mode != OPENMP_MODE_OFF) {
+    printf("Applying sobel to region %d of image %d with OpenMP parallelization using %d threads\n",
+           region->region_id, region->image_id, num_threads);
+  }
+  else {
+    printf("Applying sobel to region %d of image %d without OpenMP parallelization\n",
+           region->region_id, region->image_id);
+  }
+  apply_sobel_filter_to_region(region, sg_openmp_mode);
 }
 
 static inline void apply_all_filters_to_region_gpu(Region *region,
                                                    int blur_size,
                                                    int blur_threshold,
-                                                   int use_gpu) {
-  apply_gray_filter_to_region_dispatch(region, use_gpu);
+                                                   int use_gpu, runtime_config_t config) {
+  if (use_gpu && config.cuda_mode == CUDA_MODE_AUTO) {
+    if (region->region_height * region->region_width > CUDA_THRESHOLD) {
+      use_gpu = 1;
+    } else {
+      printf("Region %d of image %d is too small for GPU acceleration, using CPU\n",
+             region->region_id, region->image_id);
+      use_gpu = 0;
+    }
+  }
+  if (config.cuda_mode == CUDA_MODE_OFF) {
+    printf("Warning: Cuda disabled in runtime config, using CPU for all filters\n");
+  }
+  apply_gray_filter_to_region_dispatch(region, use_gpu, config);
   apply_blur_filter_to_region_dispatch(region, blur_size, blur_threshold,
-                                       use_gpu);
-  apply_sobel_filter_to_region_dispatch(region, use_gpu);
+                                       use_gpu, config);
+  apply_sobel_filter_to_region_dispatch(region, use_gpu, config);
 }
 
 static inline void apply_all_filters_to_region_mpi_gpu(Region *region,
                                                        int blur_size,
                                                        int blur_threshold,
                                                        MPI_Comm comm,
-                                                       int use_gpu) {
-  apply_gray_filter_to_region_dispatch(region, use_gpu);
+                                                       int use_gpu, runtime_config_t config) {
+  if (use_gpu && config.cuda_mode == CUDA_MODE_AUTO) {
+    if (region->region_height * region->region_width > CUDA_THRESHOLD) {
+      use_gpu = 1;
+    } else {
+      printf("Region %d of image %d is too small for GPU acceleration, using CPU\n",
+             region->region_id, region->image_id);
+      use_gpu = 0;
+    }
+  }
+  if (config.cuda_mode == CUDA_MODE_OFF) {
+    printf("Warning: Cuda disabled in runtime config, using CPU for all filters\n");
+  }
+  apply_gray_filter_to_region_dispatch(region, use_gpu, config);
   apply_blur_filter_to_region_mpi_dispatch(region, blur_size, blur_threshold,
-                                           comm, use_gpu);
-  apply_sobel_filter_to_region_dispatch(region, use_gpu);
+                                           comm, use_gpu, config);
+  apply_sobel_filter_to_region_dispatch(region, use_gpu, config);
 }
 
 #endif /* SOBEL_CUDA_H */
