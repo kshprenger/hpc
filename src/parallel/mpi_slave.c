@@ -165,7 +165,7 @@ void Slave(runtime_config_t config) {
 #ifdef USE_CUDA
     char device_name[256];
     cuda_get_device_name(device_name, sizeof(device_name));
-    printf("[Rank %d] CUDA GPU detected: %s - using GPU for all filters\n",
+    printf("[Rank %d] CUDA GPU detected: %s\n",
            rank, device_name);
 #endif
   } else {

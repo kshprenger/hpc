@@ -263,7 +263,7 @@ void Master(char *input_file, char *output_file, runtime_config_t config) {
 #ifdef USE_CUDA
     char device_name[256];
     cuda_get_device_name(device_name, sizeof(device_name));
-    printf("[Master] CUDA GPU detected: %s - using GPU for all filters\n",
+    printf("[Master] CUDA GPU detected: %s\n",
            device_name);
 #endif
   } else {
