@@ -1,0 +1,28 @@
+salloc -N 1 -n 4 -c 4 bash -c "export OMP_NUM_THREADS=4 OMP_PROC_BIND=false && mpirun --bind-to none -np 4 ./parallel_sobelf --mpi off  --openmp off --cuda off images/original/200_s.gif out.gif"
+salloc -N 1 -n 4 -c 4 bash -c "export OMP_NUM_THREADS=4 OMP_PROC_BIND=false && mpirun --bind-to none -np 4 ./parallel_sobelf --mpi auto  --openmp auto --cuda auto images/original/200_s.gif out.gif"
+salloc -N 1 -n 4 -c 4 bash -c "export OMP_NUM_THREADS=4 OMP_PROC_BIND=false && mpirun --bind-to none -np 4 ./parallel_sobelf --mpi hybrid  --openmp auto --cuda off images/original/200_s.gif out.gif"
+salloc -N 1 -n 4 -c 4 bash -c "export OMP_NUM_THREADS=4 OMP_PROC_BIND=false && mpirun --bind-to none -np 4 ./parallel_sobelf --mpi hybrid  --openmp off --cuda off images/original/200_s.gif out.gif"
+salloc -N 1 -n 4 -c 4 bash -c "export OMP_NUM_THREADS=4 OMP_PROC_BIND=false && mpirun --bind-to none -np 4 ./parallel_sobelf --mpi off  --openmp off --cuda force images/original/200_s.gif out.gif"
+
+salloc -N 1 -n 4 -c 4 bash -c "export OMP_NUM_THREADS=4 OMP_PROC_BIND=false && mpirun --bind-to none -np 4 ./parallel_sobelf --mpi off  --openmp off --cuda off images/original/1.gif out.gif"
+salloc -N 1 -n 4 -c 4 bash -c "export OMP_NUM_THREADS=4 OMP_PROC_BIND=false && mpirun --bind-to none -np 4 ./parallel_sobelf --mpi hybrid  --openmp off --cuda off images/original/1.gif out.gif"
+salloc -N 1 -n 4 -c 4 bash -c "export OMP_NUM_THREADS=4 OMP_PROC_BIND=false && mpirun --bind-to none -np 4 ./parallel_sobelf --mpi off  --openmp force --cuda off images/original/1.gif out.gif"
+salloc -N 1 -n 4 -c 4 bash -c "export OMP_NUM_THREADS=4 OMP_PROC_BIND=false && mpirun --bind-to none -np 4 ./parallel_sobelf --mpi hybrid  --openmp force --cuda off images/original/1.gif out.gif"
+salloc -N 1 -n 4 -c 4 bash -c "export OMP_NUM_THREADS=4 OMP_PROC_BIND=false && mpirun --bind-to none -np 4 ./parallel_sobelf --mpi off  --openmp off --cuda force images/original/1.gif out.gif"
+salloc -N 1 -n 4 -c 4 bash -c "export OMP_NUM_THREADS=4 OMP_PROC_BIND=false && mpirun --bind-to none -np 4 ./parallel_sobelf --mpi auto  --openmp auto --cuda auto images/original/1.gif out.gif"
+
+salloc -N 1 -n 6 -c 4 bash -c "export OMP_NUM_THREADS=4 OMP_PROC_BIND=false && mpirun --bind-to none -np 6 ./parallel_sobelf --mpi auto --openmp auto --cuda off images/original/051009.vince.gif out.gif"
+salloc -N 1 -n 6 -c 4 bash -c "export OMP_NUM_THREADS=4 OMP_PROC_BIND=false && mpirun --bind-to none -np 6 ./parallel_sobelf --mpi auto --openmp force --cuda off images/original/051009.vince.gif out.gif"
+
+salloc -N 1 -n 4 -c 4 bash -c "export OMP_NUM_THREADS=4 OMP_PROC_BIND=false && mpirun --bind-to none -np 4 ./parallel_sobelf --mpi off  --openmp off --cuda off images/original/Campusplan-Mobilitaetsbeschraenkte.gif out.gif"
+salloc -N 1 -n 4 -c 4 bash -c "export OMP_NUM_THREADS=4 OMP_PROC_BIND=false && mpirun --bind-to none -np 4 ./parallel_sobelf --mpi hybrid  --openmp off --cuda off images/original/Campusplan-Mobilitaetsbeschraenkte.gif out.gif"
+salloc -N 1 -n 4 -c 4 bash -c "export OMP_NUM_THREADS=4 OMP_PROC_BIND=false && mpirun --bind-to none -np 4 ./parallel_sobelf --mpi off  --openmp force --cuda off images/original/Campusplan-Mobilitaetsbeschraenkte.gif out.gif"
+salloc -N 1 -n 4 -c 4 bash -c "export OMP_NUM_THREADS=4 OMP_PROC_BIND=false && mpirun --bind-to none -np 4 ./parallel_sobelf --mpi hybrid  --openmp force --cuda off images/original/Campusplan-Mobilitaetsbeschraenkte.gif out.gif"
+salloc -N 1 -n 4 -c 4 bash -c "export OMP_NUM_THREADS=4 OMP_PROC_BIND=false && mpirun --bind-to none -np 4 ./parallel_sobelf --mpi auto  --openmp auto --cuda auto images/original/Campusplan-Mobilitaetsbeschraenkte.gif out.gif"
+
+salloc -N 1 -n 4 -c 4 bash -c "export OMP_NUM_THREADS=4 OMP_PROC_BIND=false && mpirun --bind-to none -np 4 ./parallel_sobelf --mpi off  --openmp off --cuda off images/new/campusx3.gif out.gif"
+salloc -N 1 -n 4 -c 4 bash -c "export OMP_NUM_THREADS=4 OMP_PROC_BIND=false && mpirun --bind-to none -np 4 ./parallel_sobelf --mpi auto  --openmp auto --cuda off images/new/campusx3.gif out.gif"
+salloc -N 1 -n 4 -c 4 bash -c "export OMP_NUM_THREADS=4 OMP_PROC_BIND=false && mpirun --bind-to none -np 4 ./parallel_sobelf --mpi auto  --openmp auto --cuda off images/new/campusx3.gif out.gif"
+salloc -N 1 -n 6 -c 4 bash -c "export OMP_NUM_THREADS=4 OMP_PROC_BIND=false && mpirun --bind-to none -np 6 ./parallel_sobelf --mpi auto  --openmp auto --cuda off images/new/campusx3.gif out.gif"
+salloc -N 1 -n 4 -c 4 bash -c "export OMP_NUM_THREADS=4 OMP_PROC_BIND=false && mpirun --bind-to none -np 4 ./parallel_sobelf --mpi auto  --openmp auto --cuda auto images/new/campusx3.gif out.gif"
+
